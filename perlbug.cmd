@@ -19,7 +19,7 @@ use strict;
 sub paraprint;
 
 
-my($Version) = "1.16";
+my($Version) = "1.17";
 
 # Changed in 1.06 to skip Mail::Send and Mail::Util if not available.
 # Changed in 1.07 to see more sendmail execs, and added pipe output.
@@ -38,6 +38,7 @@ my($Version) = "1.16";
 # Changed in 1.15 to add warnings to stop people using perlbug for non-bugs.
 #                 Also report selected environment variables.
 # Changed in 1.16 to include @INC, and allow user to re-edit if no changes.
+# Changed in 1.17 Win32 support added.  GSAR 97-04-12
 
 # TODO: Allow the user to re-name the file on mail failure, and
 #       make sure failure (transmission-wise) of Mail::Send is 
@@ -45,7 +46,7 @@ my($Version) = "1.16";
 
 my( $file, $usefile, $cc, $address, $perlbug, $testaddress, $filename,
     $subject, $from, $verbose, $ed, 
-    $fh, $me, $Is_VMS, $msg, $body, $andcc, %REP);
+    $fh, $me, $Is_MSWin32, $Is_VMS, $msg, $body, $andcc, %REP);
 
 Init();
 
@@ -72,6 +73,7 @@ sub Init {
  
 	# -------- Setup --------
 
+	$Is_MSWin32 = $^O eq 'MSWin32';
 	$Is_VMS = $^O eq 'VMS';
 
 	getopts("dhva:s:b:f:r:e:SCc:t");
@@ -119,12 +121,12 @@ sub Init {
 
 	# Editor
 	$ed = (	$::opt_e || $ENV{VISUAL} || $ENV{EDITOR} || $ENV{EDIT} || 
-		      ($Is_VMS ? "edit/tpu" : "vi")
+		      ($Is_VMS ? "edit/tpu" : $Is_MSWin32 ? "notepad" : "vi")
 	      );
 	      
       
 	# My username
-	$me = getpwuid($<);
+	$me = ($Is_MSWin32 ? $ENV{'USERNAME'} : getpwuid($<));
 
 }
 
@@ -136,9 +138,14 @@ sub Query {
 	paraprint <<EOF;
 This program provides an easy way to create a message reporting a bug
 in perl, and e-mail it to $address.  It is *NOT* intended for
-sending test messages or simply verifying that perl works.  It is *ONLY*
-a means of reporting verifiable problems with perl, and any solutions to
-such problems, to the people who maintain perl.
+sending test messages or simply verifying that perl works, *NOR* is it
+intended for reporting bugs in third-party perl modules.  It is *ONLY*
+a means of reporting verifiable problems with the core perl distribution,
+and any solutions to such problems, to the people who maintain perl.
+
+If you're just looking for help with perl, try posting to the Usenet
+newsgroup comp.lang.perl.misc.  If you're looking for help with using
+perl with CGI, try posting to comp.infosystems.www.programming.cgi.
 
 EOF
 
@@ -177,6 +184,8 @@ EOF
 		
 		if($::HaveUtil) {
 			$domain = Mail::Util::maildomain();
+		} elsif ($Is_MSWin32) {
+			$domain = $ENV{'USERDOMAIN'};
 		} elsif ($Is_VMS) {
 			require Sys::Hostname;
 			$domain = Sys::Hostname::hostname();
@@ -310,7 +319,8 @@ EOF
 	# Generate scratch file to edit report in
 	
 	{
-	my($dir) = $Is_VMS ? 'sys$scratch:' : '/tmp/';
+	my($dir) = ($Is_VMS ? 'sys$scratch:' :
+		    ($Is_MSWin32 and $ENV{'TEMP'} ? $ENV{'TEMP'} : '/tmp/'));
 	$filename = "bugrep0$$";
 	$filename++ while -e "$dir$filename";
 	$filename = "$dir$filename";
@@ -441,11 +451,11 @@ EOF
 ---
 Environment for perl $]:
 EOF
-        for my $env (qw(PATH LD_LIBRARY_PATH
-		    PERL5LIB PERLLIB PERL5DB
-		    LC_ALL LC_COLLATE LC_CTYPE LC_MONETARY LC_NUMERIC LC_TIME
-		    LANG PERL_BADLANG
-		    SHELL HOME LOGDIR)) {
+        for my $env (sort
+		     (qw(PATH LD_LIBRARY_PATH
+			 LANG PERL_BADLANG
+			 SHELL HOME LOGDIR),
+		      grep { /^(?:PERL|LC_)/ } keys %ENV)) {
 	    print OUT "    $env",
                       exists $ENV{$env} ? "=$ENV{$env}" : ' (unset)',
 	              "\n";
@@ -474,8 +484,8 @@ EOF
 	
 tryagain:
 	if(!$usefile and !$body) {
-		my($sts) = system("$ed $filename");
-		if( $Is_VMS ? !($sts & 1) : $sts ) {
+		my $sts = system("$ed $filename");
+		if($sts) {
 			#print "\nUnable to run editor!\n";
 			paraprint <<EOF;
 
@@ -653,7 +663,7 @@ sub Send {
 			}
 			$subject =~ s/"/""/g; $address =~ s/"/""/g; $cc =~ s/"/""/g;
 			my($sts) = system(qq[mail/Subject="$subject" $filename. "$address","$cc"]);
-			if (!($sts & 1)) { die "Can't spawn off mail\n\t(leaving bug report in $filename): $sts\n;" }
+			if ($sts) { die "Can't spawn off mail\n\t(leaving bug report in $filename): $sts\n;" }
 		} else {
 			my($sendmail) = "";
 			

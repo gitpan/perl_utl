@@ -4,9 +4,15 @@ extproc perl -S
 	if $running_under_some_shell;
 
 use Config;
-$perlincl = @Config{installsitearch};
+use File::Path qw(mkpath);
 
-chdir '/usr/include' || die "Can't cd /usr/include";
+my $Exit = 0;
+
+my $Dest_dir = (@ARGV && $ARGV[0] =~ s/^-d//)
+		    ? shift || shift
+		    : $Config{installsitearch};
+die "Destination directory $Dest_dir doesn't exist or isn't a directory\n"
+    unless -d $Dest_dir;
 
 @isatype = split(' ',<<END);
 	char	uchar	u_char
@@ -35,12 +41,10 @@ foreach $file (@ARGV) {
 	print "$file -> $outfile\n";
 	if ($file =~ m|^(.*)/|) {
 	    $dir = $1;
-	    if (!-d "$perlincl/$dir") {
-		mkdir("$perlincl/$dir",0777);
-	    }
+	    mkpath "$Dest_dir/$dir";
 	}
-	open(IN,"$file") || ((warn "Can't open $file: $!\n"),next);
-	open(OUT,">$perlincl/$outfile") || die "Can't create $outfile: $!\n";
+	open(IN,"$file") || (($Exit = 1),(warn "Can't open $file: $!\n"),next);
+	open(OUT,">$Dest_dir/$outfile") || die "Can't create $outfile: $!\n";
     }
     while (<IN>) {
 	chop;
@@ -65,7 +69,9 @@ foreach $file (@ARGV) {
 		s/\s+$//;
 		if (s/^\(([\w,\s]*)\)//) {
 		    $args = $1;
+    	    	    my $proto = '() ';
 		    if ($args ne '') {
+    	    	    	$proto = '';
 			foreach $arg (split(/,\s*/,$args)) {
 			    $arg =~ s/^\s*([^\s].*[^\s])\s*$/$1/;
 			    $curargs{$arg} = 1;
@@ -79,10 +85,10 @@ foreach $file (@ARGV) {
 		    if ($t ne '') {
 			$new =~ s/(['\\])/\\$1/g;
 			print OUT $t,
-			  "eval 'sub $name {\n$t    ${args}eval \"$new\";\n$t}';\n";
+			  "eval 'sub $name $proto\{\n$t    ${args}eval \"$new\";\n$t}';\n";
 		    }
 		    else {
-			print OUT "sub $name {\n    ${args}eval \"$new\";\n}\n";
+			print OUT "sub $name $proto\{\n    ${args}eval \"$new\";\n}\n";
 		    }
 		    %curargs = ();
 		}
@@ -92,10 +98,10 @@ foreach $file (@ARGV) {
 		    $new = 1 if $new eq '';
 		    if ($t ne '') {
 			$new =~ s/(['\\])/\\$1/g;
-			print OUT $t,"eval 'sub $name {",$new,";}';\n";
+			print OUT $t,"eval 'sub $name () {",$new,";}';\n";
 		    }
 		    else {
-			print OUT $t,"sub $name {",$new,";}\n";
+			print OUT $t,"sub $name () {",$new,";}\n";
 		    }
 		}
 	    }
@@ -149,6 +155,8 @@ foreach $file (@ARGV) {
     }
     print OUT "1;\n";
 }
+
+exit $Exit;
 
 sub expr {
     while ($_ ne '') {
@@ -227,8 +235,8 @@ sub expr {
 	    else {
 		if ($inif && $new !~ /defined\s*\($/) {
 		    $new .= '(defined(&' . $id . ') ? &' . $id . ' : 0)';
-		} 
-		elsif (/^\[/) { 
+		}
+		elsif (/^\[/) {
 		    $new .= ' $' . $id;
 		}
 		else {
@@ -259,6 +267,10 @@ format.
 It is most easily run while in /usr/include:
 
 	cd /usr/include; h2ph * sys/*
+
+The output files are placed in the hierarchy rooted at Perl's
+architecture dependent library directory.  You can specify a different
+hierarchy with a B<-d> switch.
 
 If run with no arguments, filters standard input to standard output.
 

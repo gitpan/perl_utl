@@ -148,7 +148,7 @@ Not being able to say "no diagnostics" is annoying, but may not be
 insurmountable.
 
 The C<-pretty> directive is called too late to affect matters.
-You have to to this instead, and I<before> you load the module.
+You have to do this instead, and I<before> you load the module.
 
     BEGIN { $diagnostics::PRETTY = 1 } 
 
@@ -169,12 +169,16 @@ require 5.001;
 use Carp;
 
 use Config;
+($privlib, $archlib) = @Config{qw(privlibexp archlibexp)};
 if ($^O eq 'VMS') {
-    $PODFILE = VMS::Filespec::unixify($Config{privlibexp}).'/pod/perldiag.pod';
+    require VMS::Filespec;
+    $privlib = VMS::Filespec::unixify($privlib);
+    $archlib = VMS::Filespec::unixify($archlib);
 }
-else {
-    $PODFILE = $Config{privlibexp} . "/pod/perldiag.pod";
-}
+@trypod = ("$archlib/pod/perldiag.pod",
+	   "$privlib/pod/perldiag-$].pod",
+	   "$privlib/pod/perldiag.pod");
+($PODFILE) = ((grep { -e } @trypod), $trypod[$#trypod])[0];
 
 $DEBUG ||= 0;
 my $WHOAMI = ref bless [];  # nobody's business, prolly not even mine
@@ -191,7 +195,8 @@ CONFIG: {
     unless (caller) { 
 	$standalone++;
 	require Getopt::Std;
-	Getopt::Std::getopts('pdvf:') || die "Usage: $0 [-v] [-p] [-f splainpod]";
+	Getopt::Std::getopts('pdvf:')
+	    or die "Usage: $0 [-v] [-p] [-f splainpod]";
 	$PODFILE = $opt_f if $opt_f;
 	$DEBUG = 2 if $opt_d;
 	$VERBOSE = $opt_v;
@@ -449,6 +454,7 @@ sub death_trap {
 
 sub splainthis {
     local $_ = shift;
+    local $\;
     ### &finish_compilation unless %msg;
     s/\.?\n+$//;
     my $orig = $_;

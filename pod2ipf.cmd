@@ -6,7 +6,7 @@ use File::Copy 'copy';
 use Cwd;
 use Config '%Config';
 use Getopt::Long 'GetOptions';
-use vars qw{%do_file_hash %do_dirs_hash %bin_hash 
+use vars qw{%do_file_hash %do_dirs_hash %bin_hash %faqs_hash %pragmas_hash
 	    %mods_hash %pod_hash %add_mods_hash @add_dirs %tree_hash};
 # use Fatal qw(open close); # would not work: interprets filehandles as barewords.
 sub intern_modnamehash;
@@ -77,6 +77,8 @@ $VERSION = "1.11";
 #	Support for WWW links via lynx.
 #
 # Use of uninit value comes from findrefid for pod2ipf it it is not present.
+# 1.5:  Add back perltoc - have refs to it.
+#	:i[12] tags are shortened to avoid segfaults.
 
 $font = ''; #':font facename=Helv size=16x8.';
 
@@ -99,6 +101,7 @@ $do_mods = 1;
 $do_std = 1;
 $head_off = 2;
 $do_tree = 1;
+$do_faqs = 1;
 $by_files = $by_dirs = 0;
 @add_dirs = ();
 my @args = @ARGV;
@@ -122,12 +125,14 @@ sub by_files {
 
 %cat_descr = (
 	      pod => 'Perl documentation',
+	      faqs => 'Frequently asked questions',
 	      bin => 'Perl utilities (with POD documentation)',
 	      mods => 'Standard Perl modules',
 	      add_mods => 'Additional Perl modules',
 	      do_file => 'Additional modules',
 	      do_dirs => 'Additional directories',
 	      tree => 'Hierarchy of documented perl modules',
+	      pragmas => 'Pragmata: change Perl\'s behaviour',
 	     );
 
 sub add_dir {			# If without args, just finish processing
@@ -154,6 +159,7 @@ GetOptions(
 	   "std!" => \$do_std,	# Scan through standard Perl PODs
 	   "bin!" => \$do_bin,	# Scan through $Config{bin}
 	   "tree!" => \$do_tree, # Output tree
+	   "faqs!" => \$do_faqs, # Output faqs
 	   "file=s@" => \@do_file, # If present, do these files too
 	   "dir=s@" => \@do_dirs, # Which addnl directories to scan
 	   "dump_xref!" => \$dump_xref,	# Dump them to STDERR
@@ -223,7 +229,7 @@ if (@do_file) {
   }
 }
 
-if ($do_mods) {
+if ($do_mods or $do_faqs) {
   foreach $libdir ( @INC ) {
     do_libdir $libdir;
   }
@@ -259,10 +265,24 @@ if ($do_std and -f 'perl.pod') {
   }
   while (<MPOD>) {
     last if /^\S/;
-    push @files, [$1, $2] if /^\s+(\S*)\s+(.*)/ and $1 ne 'perltoc';
+    push @files, [$1, $2] if /^\s+(\S*)\s+(.*)/ and $1 !~ /^perlfaq/; 
+				# and $1 ne 'perltoc';
   }
   close MPOD;
-  splice @files, 1, 0, [ 'perlos2',      'Perl under OS/2' ];
+  open MPOD, 'perltoc.pod';
+  while (<MPOD>) {
+    last if /^=head1\s+pragma/i;
+  }
+  while (<MPOD>) {
+    last if /^=head1/;
+    push @pragmas, $1 if /^=head2\s+(\S*)\s+-\s/; 
+  }
+  close MPOD;
+  foreach $key (@pragmas) {
+    $pragmas_hash{$key} = delete $mods_hash{$key};
+  }
+  splice @files, 1, 0, [ 'perlos2',      'Perl under OS/2' ],
+     [ 'perltoc',      'Internal table of contents for Perl' ];
   push @files, [ 'perlinstall',  'Installation/compilation of Perl'],
                ['Pumpkin', 'Notes on handling the Perl Patch Pumpkin'];
   if (-f '../INSTALL' and not -f 'perlinstall.pod') {
@@ -281,6 +301,37 @@ if ($do_std and -f 'perl.pod') {
   }
 }
 
+if ($do_faqs and -f 'perlfaq.pod') {
+  opendir DOT, '.';
+  while (defined($file = readdir DOT)) {
+    next unless $file =~ /(perlfaq.*)[.]pod/i;
+    push @faqsfiles, $1;
+  }
+  closedir DOT;
+  # push @faqsfiles, [$1, $2] if /^\s+(\S*)\s+(.*)/ and $1 =~ /^perlfaq/; 
+  
+  for $file (@faqsfiles) {
+    #$faqs_hash{$file}++;
+    print STDERR "Doing faq `$file'\n";
+    
+    $faqs_hash{$file} = delete $mods_hash{"Pod::$file"} || 
+      delete $mods_hash{"pod::$file"} || delete $mods_hash{$file};
+    delete $mods_hash{"pod::$file"};
+    delete $mods_hash{"$file"};
+    delete $mods_hash{"Pod::$file"};
+    delete $modnamehash{"pod::$file"};
+    delete $modnamehash{"$file"};
+    delete $modnamehash{"Pod::$file"};
+    # $moddesc{$file->[0]} = $file->[1];
+    if ($moddesc{$file} =~ s/(\(\$.*\$\))//) {
+      $add_info{$file} = $1;
+    }
+  }
+  unless ($do_mods) {
+    %mods_hash = %add_mods_hash = ();
+  }
+}
+
 foreach $module (keys %skipNAMEs) {
   $skip_sections{"$module/NAME"}++;
 }
@@ -289,7 +340,7 @@ foreach $module (keys %skipNAMEs) {
 #  create_tree([keys %modnamehash]);  
 #}
 
-my @std_categories = (qw(pod mods add_mods bin do_dirs),
+my @std_categories = (qw(pod pragmas mods add_mods bin faqs do_dirs),
 		      (map "do_dirs$_", 1 .. @add_dir/2),
 		      qw(do_file tree));
 print STDERR "Categories: `@std_categories'.\n" if $debug;
@@ -307,12 +358,13 @@ for $pod (@files) {
   $doing_pod{$pod->[0] . ".pod"}++;
 }
 
-for $pod (qw(perlovl.pod perltoc.pod)) {
+for $pod (qw(perlovl.pod)) {
   $obsolete{$pod}++;
 }
 
 for $pod (<*.pod>) {
-  $not_doing_pod{$pod}++ unless $doing_pod{$pod} or $obsolete{$pod};
+  $not_doing_pod{$pod}++ 
+    unless $doing_pod{$pod} or $obsolete{$pod} or $pod =~ /perlfaq/;
 }
 
 for $pod (keys %not_doing_pod) {
@@ -469,7 +521,7 @@ EOI
     if ($head_off <= 1 or (keys %categories) <= 1) {
       if ($head_off > 1) {
 	print <<EOP if $pass == 2;
-:h1 toc=$maxtoc group=$groups{links} x=left width=$panelwidths{links} id=63800.$DocTitle
+:h1 toc=$maxtoc group=$groups{links} x=left width=$panelwidths{links} id=63000.$DocTitle
 $DocTitle.
 
 EOP
@@ -517,7 +569,7 @@ print STDERR "Found $foundrefs crosslinks.\n";
 
 sub category_emit {
   my $cat = shift;
-  $cat_id ||= 63800;
+  $cat_id ||= 63000;
   $cat_id++;
   print <<EOP;
 :h1 toc=$maxtoc group=$groups{links} x=left width=$panelwidths{links} id=$cat_id.$cat_descr{$cat}
@@ -557,6 +609,9 @@ sub output_file {
                 . out($section, 0) . "\n" . $font; # Headers take no fonts.
             output_index($section, $ftitle);
             output_index($ftitle, $ftitle);
+	    if (exists $add_info{$ftitle}) {
+	      print out($add_info{$ftitle}, 0), ":p.\n"
+	    }
 	    $was_nl = 1;
 	} else {
 	    count_index($section);
@@ -905,6 +960,8 @@ sub untabify_after {		# Some markup is already there.
 sub output_index {
   return &count_index if $pass == 1;
   my ($heading, $path) = (shift, shift);
+  $heading = substr($heading, 0, 110) . "..." if length $heading > 124;
+  $path = substr($path, 0, 110) . "..." if length $path > 124;
   if ($index_seen{$heading} > 1) {
     my $id = $i1ids{$heading};
     unless ($id) {
@@ -1539,7 +1596,7 @@ sub intern_modnamehash {
 	}
     }
 
-# exclude base pods - perlfoo.pod - but not perlfaq.
+# exclude base pods - perlfoo.pod, but not perlfaqs
     /perl(?!faq).*[.]pod/ && $do_std && return;
 
 # for each file entry, kill trailing '.(pod|pm|cmd)'
@@ -1597,7 +1654,8 @@ sub intern_modnamehash {
 		  $skipNAME = length($2) == length($1);
 		  # dumpValue(\%addref);
 		} else {
-		  print STDERR "\n!!! Not matching: `$_' vs. `$2'\n";
+		  print STDERR "\n!!! Not matching: `$_' vs. `$2'\n"
+		    unless /perlfaq/;
 		}
 		$firstline_name = $2;
 		# Now process additional names this manpage may
@@ -1779,6 +1837,7 @@ Recognized command-line switches (with defaults);
   --(no)std		Scan through standard Perl PODs	(y)
   --(no)bin		Scan through $Config{bin}	(y)
   --(no)tree		Output modules tree		(y)
+  --(no)faqs		Output faqs			(y)
   --file		If present, do these files too (multiple OK)
   --dir			Which addnl directories to scan (multiple OK)
   --(no)dump-xref	Dump them to STDERR		(n)
@@ -1820,11 +1879,11 @@ files or directories to process.
 
 =head1 PREREQUISITES
 
-Developer toolkit for OS/2 is required (for C<ifpc>).
+Developer toolkit for OS/2 is required (for C<ifpc>).  It is reported that C<ipfc> is also on DDK which is freely available from IBM site.
 
 =head1 AUTHOR
 
-C<Marko.Macek@snet.fri.uni-lj.si>, C<mark@hermes.si>, with additions
+C<Marko.Macek@snet.fri.uni-lj.si>, C<mark@hermes.si>, reworked
 by Ilya Zakharevich C<ilya@math.ohio-state.edu>.
 
 =head1 SEE ALSO

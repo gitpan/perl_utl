@@ -3,6 +3,8 @@ extproc perl -S
     eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
 	if $running_under_some_shell;
 
+$DEF_PM_SECTION = '3' || '3';
+
 =head1 NAME
 
 pod2man - translate embedded Perl pod directives into man pages
@@ -337,7 +339,8 @@ usage("Usage error!") unless $uok;
 usage() if $opt_help;
 usage("Need one and only one podpage argument") unless @ARGV == 1;
 
-$section = $opt_section || ($ARGV[0] =~ /\.pm$/ ? 3 : $DEF_SECTION);
+$section = $opt_section || ($ARGV[0] =~ /\.pm$/
+				? $DEF_PM_SECTION : $DEF_SECTION);
 $RP = $opt_release || $DEF_RELEASE;
 $center = $opt_center || ($opt_official ? $STD_CENTER : $DEF_CENTER);
 $lax = $opt_lax || $DEF_LAX;
@@ -354,7 +357,6 @@ else {
     die "roff font should be 1 or 2 chars, not `$CFont_embed'";
 }
 
-$section = $opt_section || $DEF_SECTION;
 $date = $opt_date || $DEF_DATE;
 
 for (qw{NAME DESCRIPTION}) {
@@ -371,7 +373,22 @@ if ($section =~ /^1/) {
     $name = uc File::Basename::basename($name);
 }
 $name =~ s/\.(pod|p[lm])$//i;
-$name =~ s(/)(::)g; # translate Getopt/Long to Getopt::Long, etc.
+
+# Lose everything up to the first of
+#     */lib/*perl*	standard or site_perl module
+#     */*perl*/lib	from -D prefix=/opt/perl
+#     */*perl*/		random module hierarchy
+# which works.
+$name =~ s-//+-/-g;
+if ($name =~ s-^.*?/lib/[^/]*perl[^/]*/--i
+	or $name =~ s-^.*?/[^/]*perl[^/]*/lib/--i
+	or $name =~ s-^.*?/[^/]*perl[^/]*/--i) {
+    # Lose ^arch/version/.
+    $name =~ s-^[^/]+/\d+\.\d+/--;
+}
+
+# Translate Getopt/Long to Getopt::Long, etc.
+$name =~ s(/)(::)g;
 
 if ($name ne 'something') {
     FCHECK: {
@@ -383,12 +400,20 @@ if ($name ne 'something') {
 		unless (/\s*-+\s+/) {
 		    $oops++;
 		    warn "$0: Improper man page - no dash in NAME header in paragraph $. of $ARGV[0]\n"
-                  } else {
-                    %namedesc = split /\s+-+\s+/;
-                  }
+                } else {
+		    my @n = split /\s+-+\s+/;
+		    if (@n != 2) {
+			$oops++;
+			warn "$0: Improper man page - malformed NAME header in paragraph $. of $ARGV[0]\n"
+		    }
+		    else {
+			%namedesc = @n;
+		    }
+		}
 		last FCHECK;
 	    }
 	    next if /^=cut\b/;	# DB_File and Net::Ping have =cut before NAME
+	    next if /^=pod\b/;  # It is OK to have =pod before NAME
 	    die "$0: Invalid man page - 1st pod line is not NAME in $ARGV[0]\n" unless $lax;
 	}
 	die "$0: Invalid man page - no documentation in $ARGV[0]\n" unless $lax;
@@ -444,16 +469,36 @@ print <<"END";
 .if (\\n(.H=4u)&(1m=20u) .ds -- \\(*W\\h'-12u'\\(*W\\h'-8u'-\\" diablo 12 pitch
 .ds L" ""
 .ds R" ""
+'''   \\*(M", \\*(S", \\*(N" and \\*(T" are the equivalent of
+'''   \\*(L" and \\*(R", except that they are used on ".xx" lines,
+'''   such as .IP and .SH, which do another additional levels of
+'''   double-quote interpretation
+.ds M" """
+.ds S" """
+.ds N" """""
+.ds T" """""
 .ds L' '
 .ds R' '
+.ds M' '
+.ds S' '
+.ds N' '
+.ds T' '
 'br\\}
 .el\\{\\
 .ds -- \\(em\\|
 .tr \\*(Tr
 .ds L" ``
 .ds R" ''
+.ds M" ``
+.ds S" ''
+.ds N" ``
+.ds T" ''
 .ds L' `
 .ds R' '
+.ds M' `
+.ds S' '
+.ds N' `
+.ds T' '
 .ds PI \\(*p
 'br\\}
 END
@@ -651,6 +696,10 @@ while (<>) {
 	# trofficate backslashes; must do it before what happens below
 	s/\\/noremap('\\e')/ge;
 
+# protect leading periods and quotes against *roff
+# mistaking them for directives
+s/^(?:[A-Z]<)?[.']/\\&$&/gm;
+
 	# first hide the escapes in case we need to
 	# intuit something and get it wrong due to fmting
 
@@ -778,8 +827,19 @@ while (<>) {
 
 	($Cmd, $_) = split(' ', $_, 2);
 
+	$dotlevel = 1;
+	if ($Cmd eq 'head1') {
+	   $dotlevel = 1;
+	}
+	elsif ($Cmd eq 'head2') {
+	   $dotlevel = 1;
+	}
+	elsif ($Cmd eq 'item') {
+	   $dotlevel = 2;
+	}
+
 	if (defined $_) {
-	    &escapes;
+	    &escapes($dotlevel);
 	    s/"/""/g;
 	}
 
@@ -828,7 +888,7 @@ while (<>) {
 	if ($needspace) {
 	    &makespace;
 	}
-	&escapes;
+	&escapes(0);
 	clear_noremap(1);
 	print $_, "\n";
 	$needspace = 1;
@@ -860,6 +920,7 @@ sub nobreak {
 }
 
 sub escapes {
+    my $indot = shift;
 
     s/X<(.*?)>/mkindex($1)/ge;
 
@@ -872,9 +933,19 @@ sub escapes {
     s/([^"])--"/$1\\*(--"/g;
 
     # fix up quotes; this is somewhat tricky
+    my $dotmacroL = 'L';
+    my $dotmacroR = 'R';
+    if ( $indot == 1 ) {
+	$dotmacroL = 'M';
+	$dotmacroR = 'S';
+    }  
+    elsif ( $indot >= 2 ) {
+	$dotmacroL = 'N';
+	$dotmacroR = 'T';
+    }  
     if (!/""/) {
-	s/(^|\s)(['"])/noremap("$1\\*(L$2")/ge;
-	s/(['"])($|[\-\s,;\\!?.])/noremap("\\*(R$1$2")/ge;
+	s/(^|\s)(['"])/noremap("$1\\*($dotmacroL$2")/ge;
+	s/(['"])($|[\-\s,;\\!?.])/noremap("\\*($dotmacroR$1$2")/ge;
     }
 
     #s/(?!")(?:.)--(?!")(?:.)/\\*(--/g;
