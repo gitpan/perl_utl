@@ -21,6 +21,10 @@ sub count_index;
 sub untabify;
 sub untabify_after;
 sub strip;
+sub find_parent;
+sub insert_back;
+
+require 5.004;			# Otherwise pos() in recursive sub cores.
 
 #require 'dumpvar.pl';
 
@@ -79,6 +83,19 @@ $VERSION = "1.11";
 # Use of uninit value comes from findrefid for pod2ipf it it is not present.
 # 1.5:  Add back perltoc - have refs to it.
 #	:i[12] tags are shortened to avoid segfaults.
+# 1.6:	`pod2ipf myfile.pod' works again;
+#	--www added.
+#	<-processing could use substr with negative length for C<<=>.
+#	Index entries X<> handled (invisible).
+#	Will not produce links to "contents" pages from higher level
+#	  contents pages (YES!).
+# 1.7:	Add implicit links for targets defined by C<>.
+#	Uplinks added.
+# 1.8:	Will not reference -8.
+#	out[12] removed, substituted by 'require 5.004'.
+
+# 1.9:  Better handling of 'Go up' (last item was going to the following
+#	section).
 
 $font = ''; #':font facename=Helv size=16x8.';
 
@@ -109,6 +126,7 @@ my $foundrefs = 0;
 my %i1ids;
 my %index_seen;
 my %index_output;
+my $www = 'lynx.exe';
 
 sub by_dirs { by_files();   $by_files = 0;  $by_dirs = 1; }
 sub by_files {
@@ -119,6 +137,7 @@ sub by_files {
   $do_std = 0;
 #  $head_off = 0;
   $do_tree = 0;
+  $do_faqs = 0;
   $by_files = 1;
   $by_dirs = 0;
 }
@@ -148,7 +167,7 @@ sub add_dir {			# If without args, just finish processing
 
 if (@ARGV >= 1 and $ARGV[0] !~ /^-/) {
     unshift @ARGV, '--by-files';
-    unshift @ARGV, '--head-off=0' if @ARGV == 1;
+    unshift @ARGV, '--head-off=0' if @ARGV == 2;
 }
 
 GetOptions(
@@ -163,14 +182,15 @@ GetOptions(
 	   "file=s@" => \@do_file, # If present, do these files too
 	   "dir=s@" => \@do_dirs, # Which addnl directories to scan
 	   "dump_xref!" => \$dump_xref,	# Dump them to STDERR
-	   "dump_contents!" => \$dump_contents,	# Dump it to STDERR
-	   "dump_manpages!" => \$dump_manpages,	# Dump unknown to STDERR
+	   "dump-contents!" => \$dump_contents,	# Dump it to STDERR
+	   "dump-manpages!" => \$dump_manpages,	# Dump unknown to STDERR
 	   "title=s" => \$DocTitle,
 	   "head-off=i" => \$head_off,
 	   "to-bold=s@" => \@make_bold,
 	   "to-code=s@" => \@make_code,
 	   "by-files" => \&by_files,
 	   "by-dirs" => \&by_dirs,
+	   "www" => \$www,	# Browser
 	   "section-name=s" => \&add_dir,
 	   "bin-dir=s@" => \@bin_dirs, # If present, search for bins here too
 	  );
@@ -193,6 +213,8 @@ $do_about = 1 if $do_burst;
 
 $make_bold = join '|', @make_bold;
 $make_code = join '|', @make_code;
+
+$print_index = 1;		# Do not output index for tables of contents
 
 debug("Module pod/pm discovery");
   
@@ -417,10 +439,13 @@ $section_head[1] = '';		# To simplify warnings
 # Pickup modules which are not plain words, so it is safer to
 # auto-crosslink them (with :: or _, or with mixed capitalization, or
 # without vowels with at least 3 letters - avoid B and Tk):
-$auto_link = join '|', grep /::|_|[a-z][A-Z]|^[^aAeEoOyYiIuU]{3,}$/, keys %addref;
-$auto_link_hard = join '|', grep !/::|_|[a-z][A-Z]|^[^aAeEoOyYiIuU]+$/, keys %addref;
+@auto_link = grep /::|_|[a-z][A-Z]|^[^aAeEoOyYiIuU]{3,}$/, keys %addref;
+@auto_link{@auto_link} = (1) x @auto_link;
 
-print STDERR "\nautolink: $auto_link\n" if $debug;
+
+# This is the rest without vowels, will be highlighted only in obvious places:
+@auto_link_hard = grep !/::|_|[a-z][A-Z]|^[^aAeEoOyYiIuU]+$/, keys %addref;
+@auto_link_hard{@auto_link_hard} = (1) x @auto_link_hard;
 
 sub out;
 sub contents;
@@ -446,7 +471,13 @@ if (not defined $DocTitle) {
 $in_item_header = 0;
 
 for ($pass = 1; $pass <= 2; $pass++) {
-
+    if ($pass == 2) {
+      $auto_link_hard = join '|', keys %auto_link_hard;
+      $auto_link = join '|', keys %auto_link;
+      $auto_link_both = join '|', keys %auto_link, keys %auto_link_hard;
+      print STDERR "\nautolink: $auto_link\nautolink_hard: $auto_link_hard\n" 
+	if $debug;
+    }
     $headno = 0; # make refs hash for this on first pass
 
     print STDERR "pass: $pass\n";
@@ -479,7 +510,7 @@ EOI
 
 :link reftype=hd group=$groups{links} dependent vpx=left vpcx=$panelwidths{links} refid=@{[findrefid('perlos2')]}.Perl and OS/2:elink.
 
-:link reftype=hd group=$groups{text} dependent vpx=right vpcx=$panelwidths{text} refid=@{[findrefid('perlmod/CPAN')]}.Where to get ...:elink.
+:link reftype=hd group=$groups{text} dependent vpx=right vpcx=$panelwidths{text} refid=@{[findrefid('CPAN')]}.Where to get ...:elink.
 
 :link reftype=hd group=$groups{text} dependent vpx=right vpcx=$panelwidths{text} refid=@{[findrefid('ExtUtils::MakeMaker/Default Makefile Behaviour')]}.After you got it:elink.
 
@@ -503,7 +534,9 @@ EOI
 :elines.
 :h2 hide noprint nosearch id=63996.Dummy
 :artwork align=center name='CamelGrayBig.BMP'.
-Do not forget that you can alway click on :hp9.Contents:ehp9., :hp9.Search:ehp9., and :hp9.Index:ehp9. buttons, (or use :hp8.Alt-t:ehp8., :hp8.Alt-s:ehp8., :hp8.Alt-i:ehp8. correspondingly).
+Do not forget that you can alway click on :hp9.Contents:ehp9., :hp9.Search:ehp9., and :hp9.Index:ehp9. buttons (or use :hp8.Alt-t:ehp8., :hp8.Alt-s:ehp8., :hp8.Alt-i:ehp8. correspondingly).
+:font facename=Courier size=7x5. The use of a camel image in conjunction with Perl is a trademark of
+O'Reilly &amp. Associates, Inc.:font facename=default size=0x0.
 
 EOI
     }
@@ -578,6 +611,22 @@ $cat_descr{$cat}.
 EOP
 }
 
+sub process_index {
+  unless ($print_index) {
+    @index = ();
+    return;
+  }
+  my %seen;
+  for (@index) {
+    $seen{$_}++;
+  }
+  print "\n" if @index;
+  for (keys %seen) {
+    print ":i1." . out($_, 0) . "\n";    
+  }
+  @index = ();
+}
+
 sub output_file {
         my $ftitle = shift;
         my $fcomment = $moddesc{$ftitle} || "Perl module $ftitle";
@@ -588,6 +637,7 @@ sub output_file {
 	}
         $page = $ftitle;
         $toc = $maxtoc;
+	@index = ();
         
         open(IN, $fname) || die "$ftitle: open `$fname': $!";
         print STDERR $fname . ": ";
@@ -604,6 +654,7 @@ sub output_file {
         if ($pass == 2) {
 	    insert_nl;
 	    my $hlevel = $head_off >= 1 ? $head_off : 1;
+	    insert_back($hlevel,$headno - 1);
             print ":h$hlevel toc=$toc " . winhead($headno)
                 . " id=" . ($headno + $ref_delta) . "."
                 . out($section, 0) . "\n" . $font; # Headers take no fonts.
@@ -620,7 +671,7 @@ sub output_file {
         $headno++;
         
         @lstack = ();
-        $emptypane = 1;
+        $emptypane = $emptysection = 1;
 	$inpod = 0;
         
         PARA: while (defined ($line = <IN>)) {
@@ -655,7 +706,8 @@ sub output_file {
                     }
 		  }	
 		}
-    
+
+		$old_hl = $hl;
                 $hl = $1 + 1;
                 $section_head[$hl] = $heading;
                 $path = join('/', @section_head[1..$hl]);
@@ -665,6 +717,7 @@ sub output_file {
 		  next PARA;
 		}
                 contents($hl, $headno) if $emptypane;
+		insert_back($old_hl,$headno); # Previous header
                 if ($pass == 1) {
                     addsection($heading, $headno, $hl);
 		    # XXXX Is wrong with some escapes:
@@ -683,14 +736,22 @@ sub output_file {
 		}
                 $headno++;
                 print STDERR "." if $dots;
-                $emptypane = 1;
+                $emptypane = $emptysection = 1;
 	      } elsif ($line =~ /^=over\b\s*/) {
 	        $inpod = 1;
 		$step = 5;	# Default
 		$step = $& if $' =~ /\d+/;
 		$step = int($step * 4/3 + 0.5); # Take into account proportional font
                 # look ahead, to see how the list should look like
+		if ($pass == 1 and $inpod) {
+		  $auto_link_hard{$1}++,
+		  $x_index{$1} = $headno
+		    while $line =~ /X<([^<>]+)>/g;
+		}
                 chomp($line = <IN>);
+		if ($pass == 1) {
+		  $auto_link_hard{$1}++ while /X<([^<>]+)+>/g;
+		}
                 if ($line =~ /^\=item(\s*$|\s+\*)/) { # item * (or empty)
                     push(@lstack, "ul");
 		    insert_nl if $pass == 2;
@@ -761,10 +822,14 @@ sub output_file {
                 if ($lstack[$#lstack] eq 'head'
 		    or $lstack[$#lstack] eq 'finehead') {
                     contents($hl, $headno) if $emptypane;
+		    insert_back($hl,$headno) unless $emptysection; # Previous header
 
                     # lowest level never empty, IPFC uses next page
                     # by default (but Back button doesn't work :-()
+		    # 
+		    # However, we treat it specially anyway
                     $emptypane = 0;
+		    $emptysection = 1;
 		    
 		    my ($word1, $word2);
 		    $headx =~ /(\^?\w+)/; # $^A
@@ -801,6 +866,11 @@ sub output_file {
                     # look ahead to see if this =item is empty.
                     # if it is, create a list of empty pages of
                     # on first non-empty.
+		    if ($pass == 1 and $inpod) {
+		      $auto_link_hard{$1}++,
+		      $x_index{$1} = $headno
+			while $line =~ /X<([^<>]+)>/g;
+		    }
                     chomp($line = <IN>);
                     if ($pass == 2) {
                         if ($line =~ /^=item\b/) {
@@ -812,11 +882,13 @@ sub output_file {
                             }
                             $eitems = "";
                         }
-                    }
+		    } else {
+		      $auto_link_hard{$1}++ while /X<([^<>]+)+>/g;
+		    }
                     redo PARA;
                 } else {	# Different list's items
 		    local $in_item_header = 1;
-                    $emptypane = 0;
+                    $emptypane = $emptysection = 0;
 		    addref(qq|$page/"$headx"|, $headno, 1);
                     if ($lstack[$#lstack] eq 'ul' && $heading =~ /^\s*\*\s*(.*)$/ or
                         $lstack[$#lstack] eq 'ol' && $heading =~ /^\s*\d+\.?\s*(.*)$/)
@@ -868,7 +940,7 @@ sub output_file {
 		    $was_nl = 1;
 		}
                 $nopara = 0;
-                $emptypane = 0;
+                $emptypane = $emptysection = 0;
             } elsif ($line =~ /^\s+\S/m) { # see perl(run)?/SYNOPSIS for this
                 if ($pass == 2) {
                     $mark = out($line, 1);
@@ -885,11 +957,12 @@ sub output_file {
 		    $was_nl = 1;
                 }
                 $nopara = 0;
-                $emptypane = 0;
+                $emptypane = $emptysection = 0;
             } else {
                 if ($pass == 2) {
                     print ":p.\n" unless $nopara;
                     print out(untabify($line), 1);
+		    process_index();
 		    $was_nl = 0;
                 } else {
                     if ($line =~ /^\s+$/) {
@@ -897,8 +970,13 @@ sub output_file {
                     }
                 }
                 $nopara = 0;
-                $emptypane = 0;
+                $emptypane = $emptysection = 0;
             }
+	    if ($pass == 1 and $inpod) {
+	      $auto_link_hard{$1}++,
+	      $x_index{$1} = $headno
+		while $line =~ /X<([^<>]+)>/g;
+	    }
         }
         close(IN);
         print STDERR "\n" if $dots;
@@ -985,6 +1063,7 @@ sub maybe_link {
 sub strip {
     my $in = shift;
 
+    1 while $in =~ s/X<([^<>]*)>//;
     1 while $in =~ s/[A-Z]<([^<>]*)>/$1/;
     
     return $in;
@@ -992,19 +1071,23 @@ sub strip {
 
 sub try_external_link {
     my $txt = shift;
+    $foundrefs++, return ":link reftype=hd refid=$x_index{$txt}."
+      . out($txt) . ":elink."
+	if exists $x_index{$txt};
+    
     print STDERR "trying `$txt'" if $debug;
     
     if ($txt =~ m,^(http|file|ftp|mailto|news|newsrc|gopher)://,) {
 	my $link = strip($txt);
 	return 
-	  ":link reftype=launch object='lynx.exe' data='$link'."
+	  ":link reftype=launch object='$www' data='$link'."
 	    . out($txt) . ":elink.";
 
     } elsif ($txt =~ m,^\"(http|file|ftp|mailto|news|newsrc|gopher)://, 
 	     and $txt =~ /\"$/) {
-	my $link = strip(substr $txt, 1, length($text) - 2);
+	my $link = strip(substr $txt, 1, length($txt) - 2);
 	return 
-	  ":link reftype=launch object='lynx.exe' data='$link'."
+	  ":link reftype=launch object='$www' data='$link'."
 	    . out($txt) . ":elink.";
 
     } elsif ($txt =~ m,^(\w+)\([23]\)|POSIX\s*\(3\)/(\w+)|(emx\w+)$,i) {
@@ -1025,10 +1108,10 @@ sub auto_beautify {
       s/ (^|[^<]) \b ( [\w:]+ \b \([\dn]\) ) (?=$|[^>]) /$1 . maybe_link($2)/gxe;
     # words in "SEE ALSO"
     $para =~ s/ (^|[^<]) \b ( $auto_link_hard ) \b (?=$|[^>]) /$1L<$2>/gox
-	if $section_head[$hl] eq "SEE ALSO";
+	if $section_head[$hl] eq "SEE ALSO" and $auto_link_hard;
     # Link sections which are highlighted
-    $para =~ s/([CBI])<($auto_link)>/$1<L<$2>>/go if $auto_link;
-    $para =~ s/C<-(\w)>/C<L<-$1>>/g;
+    $para =~ s/([CBI])<($auto_link_both)>/$1<L<$2>>/go if $auto_link_both;
+    $para =~ s/C<-([^\W\d])>/C<L<-$1>>/g;
     $para =~ s/ ^ ( $auto_link_hard ) $  /L<$1>/ox 
       if $in_item_header and $auto_link_hard;
     # URLs inside F<>
@@ -1048,7 +1131,7 @@ sub auto_beautify {
       if $make_bold;
     $para =~ s/(^|[^<:\$@%])\b($make_code)\b(?=$|[^>:]|:[^:])/$1C<$2>/go 
       if $make_code;
-    $para =~ s/ (\s+ | ^) ( [$%@] [\w:]+ \b) (?=$|[^>]) /$1C<$2>/gx; # $var
+    $para =~ s/ (\s+ | ^) ( [\$%\@] [\w:]+ \b) (?=$|[^>]) /$1C<$2>/gx; # $var
     $para =~ s/ (^|[^<]) \b ( [\w:]+ \b \(\) ) (?=$|[^>]) /$1C<$2>/gx; # func()
     $para;
 }
@@ -1072,11 +1155,12 @@ sub out {
         $c = $1;
         
         if ($c eq '<' && $cpos >= 0) {
-            $output .= escape(substr($para, $opos, $cpos - $opos - 2));
+            $output .= escape(substr($para, $opos, $cpos - $opos - 2))
+	      if $cpos - $opos > 2;
             
             $c = substr($para, $cpos - 2, 1);
             if ($c !~ /[A-Z]/) {
-                $output .= escape($c . '<');
+	      $output .= escape(($cpos - $opos > 1 ? $c : '') . '<');
                 pos($para) = $opos = $cpos;
                 next TAG;
             }
@@ -1092,7 +1176,7 @@ sub out {
                 $output .= ':hp6.' if $markup;
                 push (@stack, $c);
             } elsif ($c eq 'S') {
-                $output .= ':hp2.' if $markup;
+                # $output .= ':hp2.' if $markup; # XXXX Should not!
                 push (@stack, $c);
             } elsif ($c eq 'I') {
 	      if (grep {$_ eq 'B'} @stack) {
@@ -1122,13 +1206,13 @@ sub out {
                         $output .= ":link reftype=hd refid=" .
                             ($links{$foundlink} + $ref_delta) . '.'
                             if $markup;
-                        $output .= out1($blink);
+                        $output .= out($blink);
                         $output .= ":elink." if $markup;
                     } elsif ($foundlink = try_external_link($link)) {
                         $output .= $foundlink if $markup;
 		    } else {
                         warn "   unresolved link: $link\n";
-                        $output .= out1($link);
+                        $output .= out($link);
                     }
                 }
             } elsif ($c eq 'E') {
@@ -1145,6 +1229,16 @@ sub out {
                     $output .= escape($esc);
                 } else {
                     warn "$fname: E<> ??? `" . (substr $para, $cpos-2, 10) . "'\n";
+                }
+            } elsif ($c eq 'X') {
+                pos ($para) = $cpos;
+                if ($para =~ m/\G([^<>]+)>/g) {
+                    my $esc;
+                    $cpos = pos $para;
+                    #$output .= escape($1);
+		    push @index, $1 if $print_index;
+                } else {
+                    warn "$fname: X<> ??? `" . (substr $para, $cpos-2, 160) . "'\n";
                 }
             } elsif ($c eq 'Z') {
                 pos ($para) = $cpos;
@@ -1165,7 +1259,7 @@ sub out {
             } elsif ($c eq 'F') {
                 $output .= ':ehp6.' if $markup;
             } elsif ($c eq 'S') {
-                $output .= ':ehp2.' if $markup;
+                # $output .= ':ehp2.' if $markup;
             } elsif ($c eq 'I') {
                 $output .= ':ehp1.' if $markup;
             } elsif ($c eq 'BI') {
@@ -1187,162 +1281,41 @@ sub out {
         $output =~ s/\n\s*/ /g;
         $output = substr($output, 0, 140); # strip too long stuff
     }
-    $output =~ s/^\./&per./;	# period
+    $output =~ s/^\./&per./m;	# period
     return $output;
 }
 
-# Another copy of out, since currently you cannot recurse into a function using pos().
-sub out1 {
-    my $para = $_[0];
-    my $markup = $_[1];
-    my @stack = ();
-    my $output = "";
-    my ($c, $cpos, $opos);
-
-    return if ($pass == 1);
-
-    $para = auto_beautify($para);
-        
-    $cpos = 0;
-    $opos = 0;
-    TAG: while ($para =~ m{([<>])}g) { # ;-) ;-)
-        $cpos = pos $para;
-        $c = $1;
-        
-        if ($c eq '<' && $cpos >= 0) {
-            $output .= escape(substr($para, $opos, $cpos - $opos - 2));
-            
-            $c = substr($para, $cpos - 2, 1);
-            if ($c !~ /[A-Z]/) {
-                $output .= escape($c . '<');
-                pos($para) = $opos = $cpos;
-                next TAG;
-            }
-            if ($c eq 'B') {
-	      if (grep {$_ eq 'I'} @stack) {
-                $output .= ':hp3.' if $markup;
-                push (@stack, 'BI');
-	      } else {
-                $output .= ':hp2.' if $markup;
-                push (@stack, $c);
-	      }
-            } elsif ($c eq 'F') {
-                $output .= ':hp6.' if $markup;
-                push (@stack, $c);
-            } elsif ($c eq 'S') {
-                $output .= ':hp2.' if $markup;
-                push (@stack, $c);
-            } elsif ($c eq 'I') {
-	      if (grep {$_ eq 'B'} @stack) {
-                $output .= ':hp3.' if $markup;
-                push (@stack, 'BI');
-	      } else {
-                $output .= ':hp1.' if $markup;
-                push (@stack, $c);
-	      }
-            } elsif ($c eq 'C') {
-                $output .= ':font facename=Courier size=18x10.' if $markup;
-                push (@stack, $c);
-            } elsif ($c eq 'L') {
-                my $link;
-	        #push (@stack, $c);
-                # link
-                pos $para = $cpos;
-		# Allow one level of included modifiers:
-                if ($para =~ m/\G(([A-Z]<[^<>]*>|[^>])+)\>/g) {
-                    $cpos = pos $para;
-                    $link = $1;
-                    $foundlink = findref($link); 
-                    if (defined $links{$foundlink}) {
-		        my $blink = $link;
-			$blink =~ s|^"(.+)"$|$1|sm or
-			  $blink =~ s|^([-\w:]+)/"(.+)"$|$1: $2|sm;
-                        $output .= ":link reftype=hd refid=" .
-                            ($links{$foundlink} + $ref_delta) . '.'
-                            if $markup;
-                        $output .= out2($blink);
-                        $output .= ":elink." if $markup;
-                    } elsif ($foundlink = try_external_link($link)) {
-                        $output .= $foundlink if $markup;
-                    } else {
-                        warn "   unresolved link: $link\n";
-                        $output .= out2($link);
-                    }
-                }
-            } elsif ($c eq 'E') {
-                pos ($para) = $cpos;
-                if ($para =~ m/\G(([A-Za-z]+)|\d+)>/g) {
-                    my $esc;
-                    $cpos = pos $para;
-		    if (defined $2) {
-		      $esc = exists $HTML_Escapes{$1} 
-		        ? $HTML_Escapes{$1} : "E<$1>";
-		    } else {
-		      $esc = chr $1;
-		    }
-                    $output .= escape($esc);
-                } else {
-                    warn "$fname: E<> ??? `" . (substr $para, $cpos-2, 10) . "'\n";
-                }
-            } elsif ($c eq 'Z') {
-                pos ($para) = $cpos;
-                if ($para =~ m/\G>/g) {
-                    $cpos = pos $para;
-                } else {
-                    warn "funny: Z<...> ???\n";
-                }
-            } else {
-                warn "$fname: what to do with $c<> ?\n";
-            }
-        } elsif ($c eq '>' && $#stack >= 0) {
-            $output .= escape(substr($para, $opos, $cpos - $opos - 1));
-            
-            $c = pop(@stack);
-            if ($c eq 'B') {
-                $output .= ':ehp2.' if $markup;
-            } elsif ($c eq 'F') {
-                $output .= ':ehp6.' if $markup;
-            } elsif ($c eq 'S') {
-                $output .= ':ehp2.' if $markup;
-            } elsif ($c eq 'I') {
-                $output .= ':ehp1.' if $markup;
-            } elsif ($c eq 'BI') {
-                $output .= ':ehp3.' if $markup;
-            } elsif ($c eq 'C') {
-                $output .= ':font facename=default size=0x0.' if $markup;
-            } elsif ($c eq 'L') {
-                # end link
-            } else {
-                $output .= escape('>');
-            }
-        } else {
-            $output .= escape(substr($para, $opos, $cpos - $opos));
-        }
-        pos($para) = $opos = $cpos;
-    }
-    $output .= escape(substr($para, $opos, length($para) - $opos));
-    if (!$markup) { # for toc/index/...
-        $output =~ s/\n\s*/ /g;
-        $output = substr($output, 0, 80); # strip too long stuff
-    }
-    return $output;
+sub insert_back {
+  return unless $pass == 2;
+  my $parent = find_parent(@_) + $ref_delta;
+  return if $parent == $_[1];
+  insert_nl;
+  print " :link reftype=hd refid=$parent.:font facename=Courier size=8x6.Go Up:font facename=default size=0x0.:elink.\n";
+  $was_nl = 1;
 }
 
-sub out2 {escape (shift)}
+sub find_parent {
+    my $level = $_[0];
+    my $i = $_[1] - 1;
+
+    while ($i > 0 && $headlevel[$i] >= $level) { $i--; }
+
+    return $i;
+}
 
 sub contents {
     my $level = $_[0];
     my $no = $_[1];
     my ($i, $cl, $toplevel);
+    local $print_index = 0;
 
+    $isempty{$no-1}++;
     if ($pass == 1) {
         $wingroup[$no - 1] = $groups{links};
         return ;
     }
     
-    $i = $no;
-
-    while ($i > 0 && $headlevel[$i] >= $level) { $i--; }
+    $i = find_parent($level,$no);
 
     $toplevel = $headlevel[$i];
 
@@ -1363,9 +1336,13 @@ sub contents {
                 $cl--;
             }
         }
-        print ":li.:link reftype=hd " . winlink($i)
+	if (exists $isempty{$i}) {
+	  print ":li.", out($head[$i], 1, 1), "\n";	
+	} else {
+	  print ":li.:link reftype=hd " . winlink($i)
             . " refid=" . ($i + $ref_delta) . "."
-            . out($head[$i], 1, 1) . ":elink.\n";
+	      . out($head[$i], 1, 1) . ":elink.\n";
+	}
 	$was_nl = 1;
     }
 
@@ -1378,7 +1355,7 @@ sub contents {
 
 sub findrefid {
   my $in = shift;
-  my $out = $links{findref($in)};
+  my $out = $links{findref($in)} || $x_index{$in};
   warn "No refid for `$in'\n" if $debug and not defined $out;
   ($out || 0) + $ref_delta;
 }
@@ -1408,7 +1385,7 @@ sub findref { # various heuristics to get a valid link
             $link = qq|$1/"$2"|;
         } elsif (exists $addref{$link} and exists $links{$addref{$link}}) {
             $link = $addref{$link};
-	} elsif ($link =~ /^-\w$/) {
+	} elsif ($link =~ /^-[^\W\d]$/) {
 	    $link = qq|perlfunc/"-X"|;
 	}
         if ($link =~ m|^([^/ ]+)/"([^\"]+)"$| && !defined $links{$link}) {
@@ -1482,7 +1459,7 @@ sub escape_with_url {
 	      [^\s.,:;!?\"\'\)] # Strip trailing punctuation.
 	     )
              ( [.,:;!?\"\'\)]* ( \s | $ ) | $ )
-           % "$1:link reftype=launch object='lynx.exe' data='" 
+           % "$1:link reftype=launch object='$www' data='" 
 	     . remove_colon($2)
 	     . "'.$2:elink.$3" 
            %xeg ;
@@ -1583,12 +1560,12 @@ sub intern_modnamehash {
 # subdir will catch it properly (Plugh::Blah)
 
 # for other libraries that are proper subdirs of the current libdir
-    foreach $otherlibrary (grep /^$libdir.+/, @INC) {
+    foreach $otherlibrary (grep /^\Q$libdir\E.+/, @INC) {
 
 # if the other library is part of the current files path, skip it
 # because it will be caught when the other library is used
 
-	if ($longname =~ /^$otherlibrary/) {
+	if ($longname =~ /^\Q$otherlibrary\//) {
 	    print STDERR ".";
 #	    print "Skipping $_\n";
 #	    print "cuz $otherlibrary caught/will catch it\n";
@@ -1851,6 +1828,7 @@ Recognized command-line switches (with defaults);
   --bin-dir		If present, search for binaries here too (multiple OK)
   --by-files		Interpret extra args as file names (n if options seen)
   --by-dirs		Interpret extra args as dir names (n)
+  --www			Which browser to use		(lynx.exe)
 
 Depending on the value of C<head_off>, the toplevel sections of the generated book are formed basing on:
 
@@ -1872,7 +1850,7 @@ processed groups of POD documents.
 
 Options C<--by-files> and C<--by-dirs> reset the values to
 
- --nodump-manpages --noburst --nobin --nomods --nostd --notree
+ --nodump-manpages --noburst --nobin --nomods --nostd --notree --nofaqs
 
 and interpret the unprocessed command-line parameters as names of
 files or directories to process.

@@ -1,9 +1,9 @@
-extproc perl -S 
+extproc perl -S
 #!f:/perllib/bin/perl -w
     eval 'exec perl -S $0 "$@"'
 	if 0;
 
-# $Id: lwp-request.PL,v 1.26 1996/05/19 11:23:05 aas Exp $
+# $Id: lwp-request.PL,v 1.29 1997/10/17 07:41:25 aas Exp $
 #
 # Simple user agent using LWP library.
 
@@ -13,7 +13,7 @@ lwp-request, GET, HEAD, POST - Simple WWW user agent
 
 =head1 SYNOPSIS
 
- lwp-request [-eEdvhx] [-m method] [-b <base URL>] [-t <timeout>]
+ lwp-request [-aeEdvhx] [-m method] [-b <base URL>] [-t <timeout>]
              [-i <if-modified-since>] [-c <content-type>] [-C <credentials>]
              [-p <proxy-url>] [-o <format>] <url>...
 
@@ -143,6 +143,11 @@ Print usage message and quit.
 
 Extra debugging output.
 
+=item -a
+
+Set text(ascii) mode for content input and output.  If this option is not 
+used, content input and output is done in binary mode.
+
 =back
 
 Because this program is implemented using the LWP library, it will
@@ -154,25 +159,29 @@ L<lwp-mirror>, L<LWP>
 
 =head1 COPYRIGHT
 
-Copyright (c) 1995, 1996 Gisle Aas. All rights reserved.
+Copyright 1995-1997 Gisle Aas.
 
 This library is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
 
 =head1 AUTHOR
 
-Gisle Aas <aas@a.sn.no>
+Gisle Aas <aas@sn.no>
 
 =cut
 
+$progname = $0;
+$progname =~ s,.*/,,;  # use basename only
+$progname =~ s/\.\w*$//; # strip extension, if any
 
-$0 =~ s,.*/,,;  # use basename only
-$VERSION = sprintf("%d.%02d", q$Revision: 1.26 $ =~ /(\d+)\.(\d+)/);
+$VERSION = sprintf("%d.%02d", q$Revision: 1.29 $ =~ /(\d+)\.(\d+)/);
 
 
 require LWP;
 require LWP::Debug;
 require URI::URL;
+
+use URI::Heuristic qw(uf_url);
 
 use HTTP::Status qw(status_message);
 use HTTP::Date qw(time2str str2time);
@@ -186,16 +195,13 @@ use HTTP::Date qw(time2str str2time);
 # "" = No content in request, "C" = Needs content in request
 #
 %allowed_methods = (
-    GET        => "",   
+    GET        => "",
     HEAD       => "",
-    POST       => "C",   
+    POST       => "C",
     PUT        => "C",
-    DELETE     => "",   
-    LINK       => "",
-    UNLINK     => "",
-    CHECKIN    => "C",
-    CHECKOUT   => "",
-    SHOWMETHOD => "",
+    DELETE     => "",
+    TRACE      => "",
+    OPTIONS    => "",
 );
 
 
@@ -236,13 +242,14 @@ use HTTP::Date qw(time2str str2time);
     }
 }
 
-$method = uc($0 eq "lwp-request" ? "GET" : $0);
+$method = uc(lc($progname) eq "lwp-request" ? "GET" : $progname);
 
 # Parse command line
 use Getopt::Std;
 
+$opt_a = undef;  # content i/o in text(ascii) mode
 $opt_m = undef;  # set method
-$opt_f = undef;  # make request even if method is now in %allowed_methods
+$opt_f = undef;  # make request even if method is not in %allowed_methods
 $opt_b = undef;  # base url
 $opt_t = undef;  # timeout
 $opt_i = undef;  # if-modified-since
@@ -265,7 +272,7 @@ $opt_P = undef;  # don't load proxy setting from environment
 
 $opt_o = undef;  # output format
 
-unless (getopts("xhvuUsSedPp:b:t:i:c:C:m:fo:")) {
+unless (getopts("axhvuUsSedPp:b:t:i:c:C:m:fo:")) {
     usage();
 }
 
@@ -275,7 +282,7 @@ if ($opt_v) {
     die <<"EOT";
 This is lwp-request version $VERSION ($DISTNAME)
 
-Copyright 1995-1996, Gisle Aas.
+Copyright 1995-1997, Gisle Aas.
 
 This program is free software; you can redistribute it and/or
 modify it under the same terms as Perl itself.
@@ -301,7 +308,7 @@ if ($opt_f) {
         $allowed_methods{$method} = "";
     }
 } elsif (!defined $allowed_methods{$method}) {
-    die "$0: $method is not an allowed method\n";
+    die "$progname: $method is not an allowed method\n";
 }
 
 if ($method eq "HEAD") {
@@ -312,7 +319,7 @@ if ($method eq "HEAD") {
 
 if (defined $opt_t) {
     $opt_t =~ /^(\d+)([smh])?/;
-    die "$0: Illegal timeout value!\n" unless defined $1;
+    die "$progname: Illegal timeout value!\n" unless defined $1;
     $timeout = $1;
     $timeout *= 60   if ($2 eq "m");
     $timeout *= 3600 if ($2 eq "h");
@@ -324,7 +331,7 @@ if (defined $opt_i) {
         $time = (stat _)[9];
     } else {
         $time = str2time($opt_i);
-        die "$0: Illegal time syntax for -i option\n"
+        die "$progname: Illegal time syntax for -i option\n"
             unless defined $time;
     }
     $opt_i = time2str($time);
@@ -339,14 +346,15 @@ if ($allowed_methods{$method} eq "C") {
               "application/x-www-form-urlencoded"
             : "text/plain";
     } else {
-        die "$0: Illegal Content-type format\n"
+        die "$progname: Illegal Content-type format\n"
             unless $opt_c =~ m,^[\w\-]+/[\w\-]+$,
     }
     print "Please enter content ($opt_c) to be ${method}ed:\n"
         if -t;
+    binmode STDIN unless -t or $opt_a;
     $content = join("", <STDIN>);
 } else {
-    die "$0: Can't set Content-type for $method requests\n"
+    die "$progname: Can't set Content-type for $method requests\n"
         if defined $opt_c;
 }
 
@@ -368,11 +376,10 @@ while ($url = shift) {
     # Create the URL object, but protect us against bad URLs
     eval {
 	if ($url =~ /^\w+:/ || $opt_b) {  # is there any scheme specification
-	    $url = new URI::URL $url, $opt_b;
+	    $url = URI::URL->new($url, $opt_b);
 	} else {
-	    # No scheme specified for the URL (treat it as a file)
-	    $url = newlocal URI::URL $url;
-	}
+	    $url = uf_url($url);
+        }
     };
     if ($@) {
 	$@ =~ s/at\s+\S+\s+line\s\d+//;
@@ -449,6 +456,7 @@ while ($url = shift) {
 		    die "Illegal -o option value ($opt_o)\n";
 		}
 	    } else {
+                binmode STDOUT unless $opt_a;
 		print $response->content;
 	    }
 	}
@@ -476,13 +484,14 @@ sub printResponseChain
 sub usage
 {
     die <<"EOT";
-Usage: $0 [-options] <url>...
+Usage: $progname [-options] <url>...
     -m <method>   use method for the request (default is '$method')
-    -f            make request even if $0 believes method is illegal
+    -f            make request even if $progname believes method is illegal
     -b <base>     Use the specified URL as base
     -t <timeout>  Set timeout value
     -i <time>     Set the If-Modified-Since header on the request
     -c <conttype> use this content-type for POST, PUT, CHECKIN
+    -a            Use text mode for content I/O
     -p <proxyurl> use this as a proxy
     -P            don't load proxy settings from environment
 

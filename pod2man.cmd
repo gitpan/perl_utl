@@ -1,4 +1,4 @@
-extproc perl -S 
+extproc perl -S
 #!f:/perllib/bin/perl
     eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
 	if $running_under_some_shell;
@@ -279,11 +279,12 @@ Tom Christiansen such that Larry probably doesn't recognize it anymore.
 
 $/ = "";
 $cutting = 1;
+@Indices = ();
 
 # We try first to get the version number from a local binary, in case we're
 # running an installed version of Perl to produce documentation from an
 # uninstalled newer version's pod files.
-if ($^O ne 'plan9') {
+if ($^O ne 'plan9' and $^O ne 'os2') {
   ($version,$patch) =
     `\PATH=.:..:\$PATH; perl -v` =~ /version (\d\.\d{3})(?:_(\d{2}))?/;
 }
@@ -524,13 +525,14 @@ END
 
 print <<"END";
 .TH $name $section "$RP" "$date" "$center"
-.IX Title "$name $section"
 .UC
 END
 
+push(@Indices, qq{.IX Title "$name $section"});
+
 while (($name, $desc) = each %namedesc) {
     for ($name, $desc) { s/^\s+//; s/\s+$//; }
-    print qq(.IX Name "$name - $desc"\n);
+    push(@Indices, qq(.IX Name "$name - $desc"\n));
 }
 
 print <<'END';
@@ -696,9 +698,9 @@ while (<>) {
 	# trofficate backslashes; must do it before what happens below
 	s/\\/noremap('\\e')/ge;
 
-# protect leading periods and quotes against *roff
-# mistaking them for directives
-s/^(?:[A-Z]<)?[.']/\\&$&/gm;
+	# protect leading periods and quotes against *roff
+	# mistaking them for directives
+	s/^(?:[A-Z]<)?[.']/\\&$&/gm;
 
 	# first hide the escapes in case we need to
 	# intuit something and get it wrong due to fmting
@@ -852,11 +854,11 @@ s/^(?:[A-Z]<)?[.']/\\&$&/gm;
 	    s/\s+$//;
 	    delete $wanna_see{$_} if exists $wanna_see{$_};
 	    print qq{.SH "$_"\n};
-	    print qq{.IX Header "$_"\n};
+      push(@Indices, qq{.IX Header "$_"\n});
 	}
 	elsif ($Cmd eq 'head2') {
 	    print qq{.Sh "$_"\n};
-	    print qq{.IX Subsection "$_"\n};
+      push(@Indices, qq{.IX Subsection "$_"\n});
 	}
 	elsif ($Cmd eq 'over') {
 	    push(@indent,$indent);
@@ -875,7 +877,7 @@ s/^(?:[A-Z]<)?[.']/\\&$&/gm;
 	    s/[^"]""([^"]+?)""[^"]/'$1'/g;
 	    # here do something about the $" in perlvar?
 	    print STDOUT qq{.Ip "$_" $indent\n};
-	    print qq{.IX Item "$_"\n};
+      push(@Indices, qq{.IX Item "$_"\n});
 	}
 	elsif ($Cmd eq 'pod') {
 	    # this is just a comment
@@ -907,6 +909,8 @@ if (%wanna_see && !$lax) {
 	.  ": @missing\n";
     $oops++;
 }
+
+foreach (@Indices) { print "$_\n"; }
 
 exit;
 #exit ($oops != 0);
@@ -1011,7 +1015,7 @@ sub makespace {
 sub mkindex {
     my ($entry) = @_;
     my @entries = split m:\s*/\s*:, $entry;
-    print ".IX Xref ";
+    push @Indices, ".IX Xref " . join ' ', map {qq("$_")} @entries;
     for $entry (@entries) {
 	print qq("$entry" );
     }
@@ -1070,6 +1074,7 @@ sub clear_noremap {
 
 sub internal_lrefs {
     local($_) = shift;
+    local $trailing_and = s/and\s+$// ? "and " : "";
 
     s{L</([^>]+)>}{$1}g;
     my(@items) = split( /(?:,?\s+(?:and\s+)?)/ );
@@ -1083,6 +1088,7 @@ sub internal_lrefs {
 
     $retstr .= " entr" . ( @items > 1  ? "ies" : "y" )
 	    .  " elsewhere in this document "; # terminal space to avoid words running together (pattern used strips terminal spaces)
+    $retstr .=  $trailing_and;
 
     return $retstr;
 

@@ -1,4 +1,4 @@
-extproc perl -S 
+extproc perl -S
 #!f:/perllib/bin/perl
     eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
 	if $running_under_some_shell;
@@ -15,10 +15,11 @@ push @pagers, "/usr/ucb/more" if -x "/usr/ucb/more";
 # the perl manuals, though it too is written in perl.
 
 if(@ARGV<1) {
-        $0 =~ s,.*/,,;
+	$me = $0;		# Editing $0 is unportable
+	$me =~ s,.*/,,;
 	die <<EOF;
-Usage: $0 [-h] [-v] [-t] [-u] [-m] [-l] PageName|ModuleName|ProgramName
-       $0 -f PerlFunc
+Usage: $me [-h] [-v] [-t] [-u] [-m] [-l] PageName|ModuleName|ProgramName
+       $me -f PerlFunc
 
 We suggest you use "perldoc perldoc" to get aquainted 
 with the system.
@@ -26,6 +27,11 @@ EOF
 }
 
 use Getopt::Std;
+use Config '%Config';
+
+@global_found = ();
+$global_target = "";
+
 $Is_VMS = $^O eq 'VMS';
 $Is_MSWin32 = $^O eq 'MSWin32';
 
@@ -86,43 +92,65 @@ if ($opt_f) {
    @pages = @ARGV;
 }
 
+# Does this look like a module or extension directory?
+if (-f "Makefile.PL") {
+	# Add ., lib and blib/* libs to @INC (if they exist)
+	unshift(@INC, '.');
+	unshift(@INC, 'lib') if -d 'lib';
+	require ExtUtils::testlib;
+}
+
 
 
 sub containspod {
-	my($file) = @_;
-	local($_);
-	open(TEST,"<$file");
-	while(<TEST>) {
-		if(/^=head/) {
-			close(TEST);
-			return 1;
-		}
+    my($file, $readit) = @_;
+    return 1 if !$readit && $file =~ /\.pod$/i;
+    local($_);
+    open(TEST,"<$file");
+    while(<TEST>) {
+	if(/^=head/) {
+	    close(TEST);
+	    return 1;
 	}
-	close(TEST);
-	return 0;
+    }
+    close(TEST);
+    return 0;
 }
 
- sub minus_f_nocase {
+sub minus_f_nocase {
      my($file) = @_;
+     # on a case-forgiving file system we can simply use -f $file
+     if ($Is_VMS or $Is_MSWin32 or $^O eq 'os2') {
+        return $file if -f $file and -r _;
+	warn "Ignored $file: unreadable\n" if -f _;
+	return '';
+     }
      local *DIR;
      local($")="/";
      my(@p,$p,$cip);
      foreach $p (split(/\//, $file)){
-	if (($Is_VMS or $Is_MSWin32 or $^O eq 'os2') and not scalar @p) {
-	    # VMSish filesystems don't begin at '/'
-	    push(@p,$p);
-	    next;
-	}
- 	if (-d ("@p/$p")){
+	my $try = "@p/$p";
+	stat $try;
+ 	if (-d _){
  	    push @p, $p;
- 	} elsif (-f ("@p/$p")) {
- 	    return "@p/$p";
+	    if ( $p eq $global_target) {
+		$tmp_path = join ('/', @p);
+		my $path_f = 0;
+		for (@global_found) {
+		    $path_f = 1 if $_ eq $tmp_path;
+		}
+		push (@global_found, $tmp_path) unless $path_f;
+		print STDERR "Found as @p but directory\n" if $opt_v;
+	    }
+ 	} elsif (-f _ && -r _) {
+ 	    return $try;
+ 	} elsif (-f _) {
+	    warn "Ignored $try: unreadable\n";
  	} else {
  	    my $found=0;
  	    my $lcp = lc $p;
  	    opendir DIR, "@p";
  	    while ($cip=readdir(DIR)) {
-		$cip =~ s/\.dir$// if $Is_VMS;
  		if (lc $cip eq $lcp){
  		    $found++;
  		    last;
@@ -131,47 +159,64 @@ sub containspod {
  	    closedir DIR;
  	    return "" unless $found;
  	    push @p, $cip;
- 	    return "@p" if -f "@p";
+ 	    return "@p" if -f "@p" and -r _;
+	    warn "Ignored $file: unreadable\n" if -f _;
  	}
      }
      return; # is not a file
- }
+}
  
-  sub searchfor {
-  	my($recurse,$s,@dirs) = @_;
-  	$s =~ s!::!/!g;
-  	$s = VMS::Filespec::unixify($s) if $Is_VMS;
-	return $s if -f $s && containspod($s);
-  	printf STDERR "looking for $s in @dirs\n" if $opt_v;
- 	my $ret;
- 	my $i;
- 	my $dir;
-  	for ($i=0;$i<@dirs;$i++) {
-  		$dir = $dirs[$i];
-  		($dir = VMS::Filespec::unixpath($dir)) =~ s!/$!! if $Is_VMS;
- 	    if ((    $ret = minus_f_nocase "$dir/$s.pod")
- 		or ( $ret = minus_f_nocase "$dir/$s.pm"  and containspod($ret))
- 		or ( $ret = minus_f_nocase "$dir/$s"     and containspod($ret))
-  		or ( $Is_VMS and 
- 		     $ret = minus_f_nocase "$dir/$s.com" and containspod($ret))
-		or ( $Is_MSWin32 and 
- 		     $ret = minus_f_nocase "$dir/$s.bat" and containspod($ret))
- 		or ( $ret = minus_f_nocase "$dir/pod/$s.pod")
- 		or ( $ret = minus_f_nocase "$dir/pod/$s" and containspod($ret)))
- 		{ return $ret; }
- 		
- 		if($recurse) {
-			opendir(D,$dir);
-			my(@newdirs) = grep(-d,map("$dir/$_",grep(!/^\.\.?$/,readdir(D))));
-			closedir(D);
-			@newdirs = map((s/.dir$//,$_)[1],@newdirs) if $Is_VMS;
-			next unless @newdirs;
-			print STDERR "Also looking in @newdirs\n" if $opt_v;
-			push(@dirs,@newdirs);
- 		}
- 	}
-  	return ();
-  }
+
+sub check_file {
+    my($file) = @_;
+    return minus_f_nocase($file) && containspod($file) ? $file : "";
+}
+
+
+sub searchfor {
+    my($recurse,$s,@dirs) = @_;
+    $s =~ s!::!/!g;
+    $s = VMS::Filespec::unixify($s) if $Is_VMS;
+    return $s if -f $s && containspod($s);
+    printf STDERR "Looking for $s in @dirs\n" if $opt_v;
+    my $ret;
+    my $i;
+    my $dir;
+    $global_target = (split('/', $s))[-1];
+    for ($i=0; $i<@dirs; $i++) {
+	$dir = $dirs[$i];
+	($dir = VMS::Filespec::unixpath($dir)) =~ s!/$!! if $Is_VMS;
+	if (       ( $ret = check_file "$dir/$s.pod")
+		or ( $ret = check_file "$dir/$s.pm")
+		or ( $ret = check_file "$dir/$s")
+		or ( $Is_VMS and
+		     $ret = check_file "$dir/$s.com")
+		or ( $^O eq 'os2' and 
+		     $ret = check_file "$dir/$s.cmd")
+		or ( ($Is_MSWin32 or $^O eq 'os2') and 
+		     $ret = check_file "$dir/$s.bat")
+		or ( $ret = check_file "$dir/pod/$s.pod")
+		or ( $ret = check_file "$dir/pod/$s")
+	) {
+	    return $ret;
+	}
+	
+	if ($recurse) {
+	    opendir(D,$dir);
+	    my @newdirs = map "$dir/$_", grep {
+		not /^\.\.?$/ and
+		not /^auto$/  and   # save time! don't search auto dirs
+		-d  "$dir/$_"
+	    } readdir D;
+	    closedir(D);
+	    next unless @newdirs;
+	    @newdirs = map((s/.dir$//,$_)[1],@newdirs) if $Is_VMS;
+	    print STDERR "Also looking in @newdirs\n" if $opt_v;
+	    push(@dirs,@newdirs);
+	}
+    }
+    return ();
+}
 
 
 foreach (@pages) {
@@ -185,10 +230,9 @@ foreach (@pages) {
 		for ($i = 0; $trn = $ENV{'DCL$PATH'.$i}; $i++) {
 		    push(@searchdirs,$trn);
 		}
-	    } elsif ($Is_MSWin32) {
-	        push(@searchdirs, grep(-d, split(';', $ENV{'PATH'})));
 	    } else {
-		    push(@searchdirs, grep(-d, split(':', $ENV{'PATH'})));
+	        push(@searchdirs, grep(-d, split($Config{path_sep}, 
+						 $ENV{'PATH'})));
 	    }
 	    @files= searchfor(0,$_,@searchdirs);
 	}
@@ -199,12 +243,24 @@ foreach (@pages) {
 		
 		@searchdirs = grep(!/^\.$/,@INC);
 		
-		
 		@files= searchfor(1,$_,@searchdirs);
 		if( @files ) {
 			print STDERR "Loosely found as @files\n" if $opt_v;
 		} else {
-			print STDERR "No documentation found for '$_'\n";
+			print STDERR "No documentation found for \"$_\".\n";
+			if (@global_found) {
+			    print STDERR "However, try\n";
+			    my $dir = $file = "";
+			    for $dir (@global_found) {
+				opendir(DIR, $dir) or die "$!";
+				while ($file = readdir(DIR)) {
+				    next if ($file =~ /^\./);
+				    $file =~ s/\.(pm|pod)$//;
+				    print STDERR "\tperldoc $_\::$file\n";
+				}
+				closedir DIR;
+			    }
+			}
 		}
 	}
 	push(@found,@files);
@@ -229,7 +285,12 @@ if ($Is_MSWin32) {
 	$tmp = 'Sys$Scratch:perldoc.tmp1_'.$$;
 	push @pagers, qw( most more less type/page );
 } else {
-	$tmp = "/tmp/perldoc1.$$";
+	if ($^O eq 'os2') {
+	  require POSIX;
+	  $tmp = POSIX::tmpnam();
+	} else {
+	  $tmp = "/tmp/perldoc1.$$";	  
+	}
 	push @pagers, qw( more less pg view cat );
 	unshift @pagers, $ENV{PAGER}  if $ENV{PAGER};
 }
@@ -254,13 +315,16 @@ if ($opt_f) {
 
    # Look for our function
    my $found = 0;
+   my @pod;
    while (<PFUNC>) {
        if (/^=item\s+\Q$opt_f\E\b/o)  {
-	   $found++;
+	   $found = 1;
        } elsif (/^=item/) {
-	   last if $found;
+	   last if $found > 1;
        }
-       push(@pod, $_) if $found;
+       next unless $found;
+       push @pod, $_;
+       ++$found if /^\w/;	# found descriptive text
    }
    if (@pod) {
        if ($opt_t) {

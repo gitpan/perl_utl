@@ -1,7 +1,15 @@
-extproc perl -S 
+extproc perl -S
 #!f:/perllib/bin/perl
     eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
 	if $running_under_some_shell;
+
+my $config_tag1 = '5.00455 - Wed Nov 26 18:29:32 PST 1997';
+
+my $patchlevel_date = 880475336;
+my $patch_tags = '';
+my @patches = (
+	''
+);
 
 use Config;
 use Getopt::Std;
@@ -19,7 +27,7 @@ use strict;
 sub paraprint;
 
 
-my($Version) = "1.17";
+my($Version) = "1.20";
 
 # Changed in 1.06 to skip Mail::Send and Mail::Util if not available.
 # Changed in 1.07 to see more sendmail execs, and added pipe output.
@@ -39,18 +47,28 @@ my($Version) = "1.17";
 #                 Also report selected environment variables.
 # Changed in 1.16 to include @INC, and allow user to re-edit if no changes.
 # Changed in 1.17 Win32 support added.  GSAR 97-04-12
+# Changed in 1.18 add '-ok' option for reporting build success. CFR 97-06-18
+# Changed in 1.19 '-ok' default not '-v'
+#                 add local patch information
+#                 warn on '-ok' if this is an old system; add '-okay'
+# Changed in 1.20 Added patchlevel.h reading and version/config checks
 
-# TODO: Allow the user to re-name the file on mail failure, and
+# TODO: - Allow the user to re-name the file on mail failure, and
 #       make sure failure (transmission-wise) of Mail::Send is 
 #       accounted for.
+#       - Test -b option
 
 my( $file, $usefile, $cc, $address, $perlbug, $testaddress, $filename,
     $subject, $from, $verbose, $ed, 
-    $fh, $me, $Is_MSWin32, $Is_VMS, $msg, $body, $andcc, %REP);
+    $fh, $me, $Is_MSWin32, $Is_VMS, $msg, $body, $andcc, %REP, $ok);
+
+my $config_tag2 = "$] - $Config{cf_time}";
 
 Init();
 
 if($::opt_h) { Help(); exit; }
+
+if($::opt_d) { Dump(*STDOUT); exit; }
 
 if(!-t STDIN) {
 	paraprint <<EOF;
@@ -60,7 +78,7 @@ EOF
 	die "\n";
 }
 
-if($::opt_d or !-t STDOUT) { Dump(*STDOUT); exit; }
+if(!-t STDOUT) { Dump(*STDOUT); exit; }
 
 Query();
 Edit() unless $usefile;
@@ -76,7 +94,7 @@ sub Init {
 	$Is_MSWin32 = $^O eq 'MSWin32';
 	$Is_VMS = $^O eq 'VMS';
 
-	getopts("dhva:s:b:f:r:e:SCc:t");
+	getopts("dhva:s:b:f:r:e:SCc:to:");
 	
 
 	# This comment is needed to notify metaconfig that we are
@@ -87,6 +105,7 @@ sub Init {
 	
 	# perlbug address
 	$perlbug = 'perlbug@perl.com';
+
 	
 	# Test address
 	$testaddress = 'perlbug-test@perl.com';
@@ -94,13 +113,6 @@ sub Init {
 	# Target address
 	$address = $::opt_a || ($::opt_t ? $testaddress : $perlbug);
 
-	# Possible administrator addresses, in order of confidence
-	# (Note that cf_email is not mentioned to metaconfig, since
-	# we don't really want it. We'll just take it if we have to.)
-	$cc = ($::opt_C ? "" : (
-		$::opt_c || $::Config{perladmin} || $::Config{cf_email} || $::Config{cf_by}
-		));
-	
 	# Users address, used in message and in Reply-To header
 	$from = $::opt_r || "";
 
@@ -124,9 +136,52 @@ sub Init {
 		      ($Is_VMS ? "edit/tpu" : $Is_MSWin32 ? "notepad" : "vi")
 	      );
 	      
+        # OK - send "OK" report for build on this system
+        $ok = 0;
+	if ( $::opt_o ) {
+	    if ( $::opt_o eq 'k' or $::opt_o eq 'kay' ) {
+                my $age = time - $patchlevel_date;
+                if ( $::opt_o eq 'k' and $age > 60 * 24 * 60 * 60 ) {
+                    my $date = localtime $patchlevel_date;
+                    print <<"EOF";
+\"perlbug -ok\" does not report on Perl versions which are more than
+60 days old.  This Perl version was constructed on $date.
+If you really want to report this, use \"perlbug -okay\".
+EOF
+                    exit();
+                };
+		# force these options
+		$::opt_S = 1; # don't prompt for send
+		$::opt_C = 1; # don't send a copy to the local admin
+		$::opt_s = 1;
+		$subject = "OK: perl $] ${patch_tags}on"
+			  ." $::Config{'archname'} $::Config{'osvers'} $subject";
+		$::opt_b = 1;
+		$body    = "Perl reported to build OK on this system.\n";
+		$ok = 1;
+	    }
+	    else {
+		Help();
+		exit();
+	    }
+	}
       
+	# Possible administrator addresses, in order of confidence
+	# (Note that cf_email is not mentioned to metaconfig, since
+	# we don't really want it. We'll just take it if we have to.)
+        #
+        # This has to be after the $ok stuff above because of the way
+        # that $::opt_C is forced.
+	$cc = ($::opt_C ? "" : (
+		$::opt_c || $::Config{perladmin} || $::Config{cf_email} || $::Config{cf_by}
+		));
+	
 	# My username
-	$me = ($Is_MSWin32 ? $ENV{'USERNAME'} : getpwuid($<));
+	$me = ( $Is_MSWin32 
+		? $ENV{'USERNAME'} 
+		: ( $^O eq 'os2' 
+		    ? $ENV{'USER'} || $ENV{'LOGNAME'} 
+		    : eval { getpwuid($<) }) );	# May be missing
 
 }
 
@@ -134,7 +189,7 @@ sub Init {
 sub Query {
 
 	# Explain what perlbug is
-	
+    if ( ! $ok ) {
 	paraprint <<EOF;
 This program provides an easy way to create a message reporting a bug
 in perl, and e-mail it to $address.  It is *NOT* intended for
@@ -148,6 +203,7 @@ newsgroup comp.lang.perl.misc.  If you're looking for help with using
 perl with CGI, try posting to comp.infosystems.www.programming.cgi.
 
 EOF
+    }
 
 
 	# Prompt for subject of message, if needed
@@ -186,12 +242,9 @@ EOF
 			$domain = Mail::Util::maildomain();
 		} elsif ($Is_MSWin32) {
 			$domain = $ENV{'USERDOMAIN'};
-		} elsif ($Is_VMS) {
+		} else {
 			require Sys::Hostname;
 			$domain = Sys::Hostname::hostname();
-		} else {
-			$domain = `hostname`.".".`domainname`;
-			$domain =~ s/[\r\n]+//g;
 		}
 	    
 	    my($guess);
@@ -209,6 +262,7 @@ EOF
 		$guess = $ENV{"REPLY-TO"} if defined($ENV{'REPLY-TO'});
 	
 		if( $guess ) {
+		    if ( ! $ok ) {
 			paraprint <<EOF;
 
 
@@ -216,6 +270,7 @@ Your e-mail address will be useful if you need to be contacted. If the
 default shown is not your full internet e-mail address, please correct it.
 
 EOF
+                    }
 		} else {
 			paraprint <<EOF;
 
@@ -224,12 +279,20 @@ your full internet e-mail address here.
 
 EOF
 		}
-		print "Your address [$guess]: ";
-	
-		$from = <>;
-		chop $from;
-	
-		if($from eq "") { $from = $guess }
+
+		if ( $ok && $guess ne '' ) {
+		    # use it
+		    $from = $guess;
+		}
+		else {
+		    # verify it
+		    print "Your address [$guess]: ";
+		    
+		    $from = <>;
+		    chop $from;
+		    
+		    if($from eq "") { $from = $guess }
+		}
 	
 	}
 	
@@ -320,8 +383,9 @@ EOF
 	
 	{
 	my($dir) = ($Is_VMS ? 'sys$scratch:' :
-		    ($Is_MSWin32 and $ENV{'TEMP'} ? $ENV{'TEMP'} : '/tmp/'));
+		    (($Is_MSWin32 && $ENV{'TEMP'}) ? $ENV{'TEMP'} : '/tmp/'));
 	$filename = "bugrep0$$";
+	$dir .= "\\" if $Is_MSWin32 and $dir !~ m|[\\/]$|;
 	$filename++ while -e "$dir$filename";
 	$filename = "$dir$filename";
 	}
@@ -370,8 +434,10 @@ EOF
 
 	open(REP,">$filename");
 
+	my $reptype = $ok ? "success" : "bug";
+
 	print REP <<EOF;
-This is a bug report for perl from $from,
+This is a $reptype report for perl from $from,
 generated with the help of perlbug $Version running under perl $].
 
 EOF
@@ -415,9 +481,13 @@ EOF
 sub Dump {
 	local(*OUT) = @_;
 	
-	print OUT <<EOF;
+	print REP "\n---\n";
 
----
+	print REP "This perlbug was built using Perl $config_tag1\n",
+		  "It is being executed now by  Perl $config_tag2.\n\n"
+	    if $config_tag2 ne $config_tag1;
+
+	print OUT <<EOF;
 Site configuration information for perl $]:
 
 EOF
@@ -428,15 +498,11 @@ EOF
 
 	print OUT Config::myconfig;
 
-	if($verbose) {
-		print OUT "\nComplete configuration data for perl $]:\n\n";
-		my($value);
-		foreach (sort keys %::Config) {
-			$value = $::Config{$_};
-			$value =~ s/'/\\'/g;
-			print OUT "$_='$value'\n";
-		}
-	}
+	if (@patches) {
+		print OUT join "\n\t", "Locally applied patches:", @patches;
+                print OUT "\n";
+        };
+
 	print OUT <<EOF;
 
 ---
@@ -459,6 +525,15 @@ EOF
 	    print OUT "    $env",
                       exists $ENV{$env} ? "=$ENV{$env}" : ' (unset)',
 	              "\n";
+	}
+	if($verbose) {
+		print OUT "\nComplete configuration data for perl $]:\n\n";
+		my($value);
+		foreach (sort keys %::Config) {
+			$value = $::Config{$_};
+			$value =~ s/'/\\'/g;
+			print OUT "$_='$value'\n";
+		}
 	}
 }
 
@@ -513,6 +588,7 @@ EOF
 		} 
 	}
 
+        return if $ok;
         # Check that we have a report that has some, eh, report in it.
 
         my $unseen = 0;
@@ -650,6 +726,7 @@ sub Send {
 	
 		$fh->close;  
 	
+		print "\nMessage sent.\n";
 	} else {
 		if ($Is_VMS) {
 			if ( ($address =~ /@/ and $address !~ /^\w+%"/) or
@@ -671,8 +748,20 @@ sub Send {
 			{
 				$sendmail = $_, last if -e $_;
 			}
+
+			if ($^O eq 'os2' and $sendmail eq "") {
+			  my $path = $ENV{PATH};
+			  $path =~ s:\\:/: ;
+			  my @path = split /$Config{path_sep}/, $path;
+			  for (@path) {
+			    $sendmail = "$_/sendmail", last 
+			      if -e "$_/sendmail";
+			    $sendmail = "$_/sendmail.exe", last 
+			      if -e "$_/sendmail.exe";
+			  }
+			}
 			
-			paraprint <<"EOF" and die "\n" if $sendmail eq "";
+			paraprint(<<"EOF"), die "\n" if $sendmail eq "";
 			
 I am terribly sorry, but I cannot find sendmail, or a close equivalent, and
 the perl package Mail::Send has not been installed, so I can't send your bug
@@ -683,7 +772,7 @@ been left in the file `$filename'.
 
 EOF
 			
-			open(SENDMAIL,"|$sendmail -t");
+			open(SENDMAIL,"|$sendmail -t") || die "'|$sendmail -t' failed: $|";
 			print SENDMAIL "To: $address\n";
 			print SENDMAIL "Subject: $subject\n";
 			print SENDMAIL "Cc: $cc\n" if $cc;
@@ -693,12 +782,14 @@ EOF
 			while(<REP>) { print SENDMAIL $_ }
 			close(REP);
 			
-			close(SENDMAIL);
+			if (close(SENDMAIL)) {
+			  print "\nMessage sent.\n";
+			} else {
+			  warn "\nSendmail returned status '",$?>>8,"'\n";
+			}
 		}
 	
 	}
-	
-	print "\nMessage sent.\n";
 
 	1 while unlink($filename);  # remove all versions under VMS
 
@@ -737,6 +828,10 @@ Options:
   -d	Data mode (the default if you redirect or pipe output.) 
         This prints out your configuration data, without mailing
         anything. You can use this with -v to get more complete data.
+  -ok   Report successful build on this system to perl porters
+        (use alone or with -v). Only use -ok if *everything* was ok.
+        If there were *any* problems at all then don't use -ok.
+  -okay As -ok but allow report from old builds.
   -h    Print this help message. 
   
 EOF
@@ -771,6 +866,8 @@ B<perlbug> S<[ B<-v> ]> S<[ B<-a> I<address> ]> S<[ B<-s> I<subject> ]>
 S<[ B<-b> I<body> | B<-f> I<file> ]> S<[ B<-r> I<returnaddress> ]>
 S<[ B<-e> I<editor> ]> S<[ B<-c> I<adminaddress> | B<-C> ]>
 S<[ B<-S> ]> S<[ B<-t> ]>  S<[ B<-d> ]>  S<[ B<-h> ]>
+
+B<perlbug> S<[ B<-v> ]> S<[ B<-r> I<returnaddress> ]> S<[ B<-ok> | B<okay> ]>
 
 =head1 DESCRIPTION
 
@@ -876,8 +973,8 @@ produced by running C<perl -V> (note the uppercase V).
 
 Having done your bit, please be prepared to wait, to be told the bug
 is in your code, or even to get no reply at all.  The perl maintainers
-are busy folks, so if your problem is a small one or if it is
-difficult to understand, they may not respond with a personal reply.
+are busy folks, so if your problem is a small one or if it is difficult
+to understand or already known, they may not respond with a personal reply.
 If it is important to you that your bug be fixed, do monitor the
 C<Changes> file in any development releases since the time you submitted
 the bug, and encourage the maintainers with kind words (but never any
@@ -925,6 +1022,19 @@ prepared message.
 
 Prints a brief summary of the options.
 
+=item B<-ok>
+
+Report successful build on this system to perl porters. Forces B<-S>
+and B<-C>. Forces and supplies values for B<-s> and B<-b>. Only
+prompts for a return address if it cannot guess it (for use with
+B<make>). Honors return address specified with B<-r>.  You can use this
+with B<-v> to get more complete data.   Only makes a report if this
+system is less than 60 days old.
+
+=item B<-okay>
+
+As B<-ok> except it will report on older systems.
+
 =item B<-r>
 
 Your return address.  The program will ask you to confirm its default
@@ -953,8 +1063,9 @@ Include verbose configuration data in the report.
 
 Kenneth Albanowski (E<lt>kjahds@kjahds.comE<gt>), subsequently I<doc>tored
 by Gurusamy Sarathy (E<lt>gsar@umich.eduE<gt>), Tom Christiansen
-(E<lt>tchrist@perl.comE<gt>), and Nathan Torkington
-(E<lt>gnat@frii.comE<gt>).
+(E<lt>tchrist@perl.comE<gt>), Nathan Torkington (E<lt>gnat@frii.comE<gt>),
+Charles F. Randall (E<lt>cfr@pobox.comE<gt>) and
+Mike Guy (E<lt>mjtg@cam.a.ukE<gt>).
 
 =head1 SEE ALSO
 

@@ -1,9 +1,9 @@
-extproc perl -S 
+extproc perl -S
 #!f:/perllib/bin/perl -w
     eval 'exec perl -S $0 "$@"'
 	if 0;
 
-# $Id: lwp-download.PL,v 1.2 1996/12/04 14:48:59 aas Exp $
+# $Id: lwp-download.PL,v 1.4 1997/09/26 12:11:13 aas Exp $
 
 =head1 NAME
 
@@ -11,7 +11,7 @@ lwp-download - fetch large files from the net
 
 =head1 SYNOPSIS
 
- lwp-download <url> [<local file>]
+ lwp-download [-a] <url> [<local file>]
 
 =head1 DESCRIPTION
 
@@ -25,6 +25,8 @@ library.  It is better suited to down load big files than the
 I<lwp-request> program because it does not store the file in memory.
 Another benefit is that it will keep you updated about it's progress
 and that you don't have any options to worry about.
+
+Use the C<-a> option to save the file in text (ascii) mode.
 
 =head1 EXAMPLE
 
@@ -45,7 +47,17 @@ use LWP::MediaTypes;
 use URI::URL;
 use strict;
 
-$0 =~ s,.*/,,;  # only basename left in progname
+my $progname = $0;
+$progname =~ s,.*/,,;    # only basename left in progname
+$progname =~ s/\.\w*$//; # strip extension if any
+
+#parse option
+use Getopt::Std;
+my %opts;
+unless (getopts('a', \%opts)) {
+    usage();
+}
+my $opt_a = $opts{a}; # save in binary mode
 
 my $url = url(shift || usage());
 my $argfile = shift;
@@ -122,6 +134,7 @@ my $res = $ua->request($req,
 	      $file = $argfile;
 	  }
 	  open(FILE, ">$file") || die "Can't open $file: $!";
+          binmode FILE unless $opt_a;
 	  $length = $res->content_length;
 	  $flength = fbytes($length) if defined $length;
 	  $start_t = time;
@@ -172,7 +185,7 @@ if ($res->is_success || $res->message =~ /^Interrupted/) {
     }
 } else {
     print "\n" if $shown;
-    print "$0: Can't download: ", $res->code, " ", $res->message, "\n";
+    print "$progname: Can't download: ", $res->code, " ", $res->message, "\n";
     exit 1;
 }
 
@@ -216,5 +229,5 @@ sub show
 
 sub usage
 {
-    die "Usage: $0 <url> [<lpath>]\n";
+    die "Usage: $progname [-a] <url> [<lpath>]\n";
 }

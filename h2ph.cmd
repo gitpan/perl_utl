@@ -1,4 +1,4 @@
-extproc perl -S 
+extproc perl -S
 #!f:/perllib/bin/perl
     eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
 	if $running_under_some_shell;
@@ -19,7 +19,7 @@ die "Destination directory $Dest_dir doesn't exist or isn't a directory\n"
 	short	ushort	u_short
 	int	uint	u_int
 	long	ulong	u_long
-	FILE
+	FILE	key_t	caddr_t
 END
 
 @isatype{@isatype} = (1) x @isatype;
@@ -85,10 +85,10 @@ foreach $file (@ARGV) {
 		    if ($t ne '') {
 			$new =~ s/(['\\])/\\$1/g;
 			print OUT $t,
-			  "eval 'sub $name $proto\{\n$t    ${args}eval \"$new\";\n$t}';\n";
+                        "eval 'sub $name $proto\{\n$t    ${args}eval \"$new\";\n$t}' unless defined(\&$name);\n";
 		    }
 		    else {
-			print OUT "sub $name $proto\{\n    ${args}eval \"$new\";\n}\n";
+                      print OUT "unless defined(\&$name) {\nsub $name $proto\{\n    ${args}eval \"$new\";\n}\n}\n";
 		    }
 		    %curargs = ();
 		}
@@ -98,10 +98,10 @@ foreach $file (@ARGV) {
 		    $new = 1 if $new eq '';
 		    if ($t ne '') {
 			$new =~ s/(['\\])/\\$1/g;
-			print OUT $t,"eval 'sub $name () {",$new,";}';\n";
+                      print OUT $t,"eval 'sub $name () {",$new,";}' unless defined(\&$name);\n";
 		    }
 		    else {
-			print OUT $t,"sub $name () {",$new,";}\n";
+                      print OUT $t,"unless(defined(\&$name)) {\nsub $name () {",$new,";}\n}\n";
 		    }
 		}
 	    }
@@ -160,9 +160,10 @@ exit $Exit;
 
 sub expr {
     while ($_ ne '') {
+	s/^\&//;		# hack for things that take the address of
 	s/^(\s+)//		&& do {$new .= ' '; next;};
 	s/^(0x[0-9a-fA-F]+)//	&& do {$new .= $1; next;};
-	s/^(\d+)[LlUu]*//	&& do {$new .= $1; next;};
+	s/^(\d+)\s*[LlUu]*//	&& do {$new .= $1; next;};
 	s/^("(\\"|[^"])*")//	&& do {$new .= $1; next;};
 	s/^'((\\"|[^"])*)'//	&& do {
 	    if ($curargs{$1}) {
