@@ -1,6 +1,6 @@
 extproc perl -S
-#!f:/perllib/bin/perl
-    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+#!i:/perllib/bin/perl
+    eval 'exec i:/perllib/bin/perl -S $0 ${1+"$@"}'
 	if $running_under_some_shell;
 =pod
 
@@ -132,7 +132,7 @@ See L<Pod::Html> for a list of known bugs in the translator.
 
 =head1 SEE ALSO
 
-L<perlpod>, L<Pod::HTML>
+L<perlpod>, L<Pod::Html>
 
 =head1 COPYRIGHT
 

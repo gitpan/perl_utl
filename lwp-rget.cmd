@@ -1,20 +1,18 @@
-extproc perl -S
-#!f:/perllib/bin/perl -w
+extproc perl -Sw
+#!i:/perllib/bin/perl -w
 
-eval 'exec f:/perllib/bin/perl -w -S $0 ${1+"$@"}'
+eval 'exec i:/perllib/bin/perl -w -S $0 ${1+"$@"}'
     if 0; # not running under some shell
-
-#line 18
 
 =head1 NAME
 
-lwp-rget - Retrieve WWW documents recursively
+lwp-rget - Retrieve web documents recursively
 
 =head1 SYNOPSIS
 
  lwp-rget [--verbose] [--auth=USER:PASS] [--depth=N] [--hier] [--iis]
 	  [--keepext=mime/type[,mime/type]] [--limit=N] [--nospace]
-	  [--prefix=URL] [--sleep=N] [--tolower] <URL>
+	  [--prefix=URL] [--referer=URL] [--sleep=N] [--tolower] <URL>
  lwp-rget --version
 
 =head1 DESCRIPTION
@@ -56,6 +54,12 @@ The default depth is 5.
 
 Download files into a hierarchy that mimics the web site structure.
 The default is to put all files in the current directory.
+
+=item --referer=I<URI>
+
+Set the value of the referer header for the initial request.  The
+special value C<"NONE"> can be used to suppress the referer header in
+any of subsequent requests.
 
 =item --iis
 
@@ -141,15 +145,16 @@ use strict;
 use Getopt::Long    qw(GetOptions);
 use URI::URL	    qw(url);
 use LWP::MediaTypes qw(media_suffix);
+use HTML::Entities  ();
 
 use vars qw($VERSION);
-use vars qw($MAX_DEPTH $MAX_DOCS $PREFIX $VERBOSE $QUIET $SLEEP $HIER $AUTH $IIS $TOLOWER $NOSPACE %KEEPEXT);
+use vars qw($MAX_DEPTH $MAX_DOCS $PREFIX $REFERER $VERBOSE $QUIET $SLEEP $HIER $AUTH $IIS $TOLOWER $NOSPACE %KEEPEXT);
 
 my $progname = $0;
 $progname =~ s|.*/||;  # only basename left
 $progname =~ s/\.\w*$//; #strip extension if any
 
-$VERSION = sprintf("%d.%02d", q$Revision: 1.16 $ =~ /(\d+)\.(\d+)/);
+$VERSION = sprintf("%d.%02d", q$Revision: 2.3 $ =~ /(\d+)\.(\d+)/);
 
 #$Getopt::Long::debug = 1;
 #$Getopt::Long::ignorecase = 0;
@@ -166,6 +171,7 @@ GetOptions('version'  => \&print_version,
 	   'quiet!'   => \$QUIET,
 	   'sleep=i'  => \$SLEEP,
 	   'prefix:s' => \$PREFIX,
+	   'referer:s'=> \$REFERER,
 	   'hier'     => \$HIER,
 	   'auth=s'   => \$AUTH,
 	   'iis'      => \$IIS,
@@ -209,7 +215,10 @@ unless (defined $PREFIX) {
     $PREFIX = $PREFIX->as_string;
 }
 
-%KEEPEXT = map { lc($_) => 1 } split(/\s*,\s*/, $KEEPEXT{'OPT'});
+%KEEPEXT = map { lc($_) => 1 } split(/\s*,\s*/, ($KEEPEXT{'OPT'}||0));
+
+my $SUPPRESS_REFERER;
+$SUPPRESS_REFERER++ if ($REFERER || "") eq "NONE";
 
 print <<"" if $VERBOSE;
 START	  = $start_url
@@ -217,16 +226,15 @@ MAX_DEPTH = $MAX_DEPTH
 MAX_DOCS  = $MAX_DOCS
 PREFIX	  = $PREFIX
 
-
 my $no_docs = 0;
 my %seen = ();	   # mapping from URL => local_file
 
-my $filename = fetch($start_url);
+my $filename = fetch($start_url, undef, $REFERER);
 print "$filename\n" unless $QUIET;
 
 sub fetch
 {
-    my($url, $type, $depth) = @_;
+    my($url, $type, $referer, $depth) = @_;
 
     # Fix http://sitename.com/../blah/blah.html to
     #	  http://sitename.com/blah/blah.html
@@ -293,6 +301,7 @@ sub fetch
     # See: http://ftp.sunet.se/pub/NT/mirror-microsoft/kb/Q163/7/74.TXT
     $req->header ('Accept', '*/*') if (defined $IIS);  # GIF/JPG from IIS 2.0
     $req->authorization_basic(split (/:/, $AUTH)) if (defined $AUTH);
+    $req->referer($referer) if $referer && !$SUPPRESS_REFERER;
     my $res = $ua->request($req);
 
     # Check outcome
@@ -327,7 +336,8 @@ s/
 	    ([^\s>]+)		    # quoteless value
     )
 /
-  new_link($1, lc($2), $3||$5, $4||$6||$7, $base, $name, $depth+1)
+  new_link($1, lc($2), $3||$5, HTML::Entities::decode($4||$6||$7),
+           $base, $name, "$url", $depth+1)
 /giex;
 	   # XXX
 	   # The regular expression above is not strictly correct.
@@ -340,7 +350,8 @@ s/
 	}
 	save($name, $doc);
 	return $name;
-    } else {
+    }
+    else {
 	print STDERR $res->code . " " . $res->message . "\n" if $VERBOSE;
 	$seen{$plain_url->as_string} = $url->as_string;
 	return $url->as_string;
@@ -349,11 +360,11 @@ s/
 
 sub new_link
 {
-    my($pre, $type, $quote, $url, $base, $localbase, $depth) = @_;
+    my($pre, $type, $quote, $url, $base, $localbase, $referer, $depth) = @_;
 
     $url = protect_frag_spaces($url);
 
-    $url = fetch(url($url, $base)->abs, $type, $depth);
+    $url = fetch(url($url, $base)->abs, $type, $referer, $depth);
     $url = url("file:$url", "file:$localbase")->rel
 	unless $url =~ /^[.+\-\w]+:/;
 
@@ -521,7 +532,8 @@ sub find_name
     my $dirname = ".$1";
     if (!$HIER) {
 	$dirname = "";
-    } elsif (! -d $dirname) {
+    }
+    elsif (! -d $dirname) {
 	mkdirp($dirname, 0775);
     }
 
@@ -530,7 +542,8 @@ sub find_name
 
     if ($KEEPEXT{lc($type)}) {
         $suffix = ($path =~ m/\.(.*)/) ? $1 : "";
-    } else {
+    }
+    else {
         $suffix = media_suffix($type);
     }
 
@@ -567,12 +580,13 @@ sub save
 
 sub usage
 {
-    die <<"";
+    print <<""; exit 1;
 Usage: $progname [options] <URL>
 Allowed options are:
   --auth=USER:PASS  Set authentication credentials for web site
   --depth=N	    Maximum depth to traverse (default is $MAX_DEPTH)
   --hier	    Download into hierarchy (not all files into cwd)
+  --referer=URI     Set initial referer header (or "NONE")
   --iis		    Workaround IIS 2.0 bug by sending "Accept: */*" MIME
 		    header; translates backslashes (\\) to forward slashes (/)
   --keepext=type    Keep file extension for MIME types (comma-separated list)
