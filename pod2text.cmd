@@ -1,7 +1,7 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
-    eval 'exec perl -S $0 "$@"'
-	if 0;
+    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+	if $running_under_some_shell;
 
 use Pod::Text;
 

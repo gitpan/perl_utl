@@ -1,7 +1,7 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
-    eval 'exec perl -S $0 "$@"'
-	if 0;
+    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+	if $running_under_some_shell;
 #
 # pod2latex, version 1.1
 # by Taro Kawagish (kawagish@imslab.co.jp),  Jan 11, 1995.
@@ -93,10 +93,20 @@ open(LATEX,">$pod.tex");
 &do_hdr();
 
 $cutting = 1;
+$begun = "";
 while (<POD>) {
     if ($cutting) {
 	next unless /^=/;
 	$cutting = 0;
+    }
+    if ($begun) {
+       if (/^=end\s+$begun/) {
+           $begun = "";
+       }
+       elsif ($begun =~ /^(tex|latex)$/) {
+           print LATEX $_;
+       }
+       next;
     }
     chop;
     length || (print LATEX  "\n") && next;
@@ -112,6 +122,22 @@ while (<POD>) {
 	    print LATEX  $_,"\n";
 	}
 	print LATEX  "\\end{verbatim}\n";
+	next;
+    }
+
+    if (/^=for\s+(\S+)\s*/s) {
+	if ($1 eq "tex" or $1 eq "latex") {
+	    print LATEX $',"\n";
+	} else {
+	    # ignore unknown for
+	}
+	next;
+    }
+    elsif (/^=begin\s+(\S+)\s*/s) {
+	$begun = $1;
+	if ($1 eq "tex" or $1 eq "latex") {
+	    print LATEX $'."\n";
+	}
 	next;
     }
 

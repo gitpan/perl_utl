@@ -1,14 +1,30 @@
-extproc perl -Sx
+extproc perl -wS
 #!perl -w
 use strict qw(refs subs);
 use File::Find;
+use File::Copy 'copy';
 use Cwd;
 use Config '%Config';
+use Getopt::Long 'GetOptions';
+use vars qw{%do_file_hash %do_dirs_hash %bin_hash 
+	    %mods_hash %pod_hash %add_mods_hash @add_dirs %tree_hash};
+# use Fatal qw(open close); # would not work: interprets filehandles as barewords.
 sub intern_modnamehash;
+sub do_libdir;
+sub output_file;
+sub hash_diff;
+sub auto_beautify;
+sub create_tree;
+sub format_args;
+sub output_index;
+sub count_index;
+sub untabify;
+sub untabify_after;
+sub strip;
 
 #require 'dumpvar.pl';
 
-$VERSION = "1.10.1";
+$VERSION = "1.11";
 
 # by Marko.Macek@snet.fri.uni-lj.si, mark@hermes.si
 # with additions by Ilya Zakharevich ilya@math.ohio-state.edu
@@ -31,11 +47,152 @@ $VERSION = "1.10.1";
 #     IPF requires numerical references when concatenation is used, not symbolic :-(
 #   improved handling of windows (started to be done)
 #   ...
+#
+#  Changes:
+#
+#  10.2: parml used instead of ul if needed.
+#  	Readability of .ipf improved.
+#  	BI partially supported, F<> and C<> are distinct.
+#	Some options supported.
+#
+# 10.3:	C<> works again. 
+#	--head_off works (0 and 1).
+#
+# 10.4:	Auto-beautifies some words, vars and functions, finds links
+#	--head_off works (0 and 1 and 2).
+#
+# 10.5:	--section-name works
+#	Bugs with modules in subdirectories corrected.
+#	--about works.
+#	Better auto-crosslinking.
+#
+#	2-level indices. (Since we do not know until the second pass
+#	whether we put something into an index, there are some false
+#	positives.)
+#	Handles tabs (checked with Tk).
+#	Secondary names used for crosslinking.
+# 11:   Additional logic for links like C<-M>.
+#	Will process ../INSTALL and ../Porting/pumpkin.pod as well.
+#	Additional argument --bin-dir.
+#	Support for WWW links via lynx.
+#
+# Use of uninit value comes from findrefid for pod2ipf it it is not present.
+
+$font = ''; #':font facename=Helv size=16x8.';
+
+$debug = 0;
+$debug_xref = 0;
+$dump_xref = 0;
+$dump_contents = 0;
+$dump_manpages = 1;
+$ref_delta = 1;     # start from 1
+$maxtoc = 5;
+$dots = 0;
+$multi_win = 1;     # 1 = use alternate window for toc
+@do_dirs = ();
+@do_file = ();
+@bin_dirs = ();
+$do_burst = 1;
+$do_about = 1;
+$do_bin = 1;
+$do_mods = 1;
+$do_std = 1;
+$head_off = 2;
+$do_tree = 1;
+$by_files = $by_dirs = 0;
+@add_dirs = ();
+my @args = @ARGV;
+my $foundrefs = 0;
+my %i1ids;
+my %index_seen;
+my %index_output;
+
+sub by_dirs { by_files();   $by_files = 0;  $by_dirs = 1; }
+sub by_files {
+  $dump_manpages = 0;
+  $do_burst = 0;
+  $do_bin = 0;
+  $do_mods = 0;
+  $do_std = 0;
+#  $head_off = 0;
+  $do_tree = 0;
+  $by_files = 1;
+  $by_dirs = 0;
+}
+
+%cat_descr = (
+	      pod => 'Perl documentation',
+	      bin => 'Perl utilities (with POD documentation)',
+	      mods => 'Standard Perl modules',
+	      add_mods => 'Additional Perl modules',
+	      do_file => 'Additional modules',
+	      do_dirs => 'Additional directories',
+	      tree => 'Hierarchy of documented perl modules',
+	     );
+
+sub add_dir {			# If without args, just finish processing
+  my $name = $_[1];
+  print STDERR "Starting section `$name'.\n" if @_ and $debug;
+  if (@do_dirs) {
+    @add_dir = ($cat_descr{do_dirs},[]) unless @add_dir;
+    push @{$add_dir[-1]}, @do_dirs;
+    @do_dirs = ();
+  }
+  push @add_dir, $name, [] if @_;
+}
+
+if (@ARGV >= 1 and $ARGV[0] !~ /^-/) {
+    unshift @ARGV, '--by-files';
+    unshift @ARGV, '--head-off=0' if @ARGV == 1;
+}
+
+GetOptions(
+	   "debug!" => \$debug,
+	   "burst!" => \$do_burst, # Print Logo page
+	   "about!" => \$do_about, # Print About page
+	   "mods!" => \$do_mods, # Scan through @INC
+	   "std!" => \$do_std,	# Scan through standard Perl PODs
+	   "bin!" => \$do_bin,	# Scan through $Config{bin}
+	   "tree!" => \$do_tree, # Output tree
+	   "file=s@" => \@do_file, # If present, do these files too
+	   "dir=s@" => \@do_dirs, # Which addnl directories to scan
+	   "dump_xref!" => \$dump_xref,	# Dump them to STDERR
+	   "dump_contents!" => \$dump_contents,	# Dump it to STDERR
+	   "dump_manpages!" => \$dump_manpages,	# Dump unknown to STDERR
+	   "title=s" => \$DocTitle,
+	   "head-off=i" => \$head_off,
+	   "to-bold=s@" => \@make_bold,
+	   "to-code=s@" => \@make_code,
+	   "by-files" => \&by_files,
+	   "by-dirs" => \&by_dirs,
+	   "section-name=s" => \&add_dir,
+	   "bin-dir=s@" => \@bin_dirs, # If present, search for bins here too
+	  );
+if ($by_dirs) {
+  push @do_dirs, @ARGV;
+} elsif ($by_files) {
+  push @do_file, @ARGV;
+} else {
+  warn "Ignoring \@ARGV: `@ARGV'.\n" if @ARGV;
+}
+
+add_dir();
+$do_about = 1 if $do_burst;
+
+@make_bold = qw(EMX RSX WPS Object-REXX HPFS HTML WWW GNU Perl C
+		XFree86 OS/2 CRT PM DOS VIO CPAN IBM URL) unless @make_bold;
+@make_code = qw(VCPI DPMI groff awk gawk STDIN STDOUT STDERR Emacs EPM
+		CMD 4os2 sh pdksh zip unzip pkunzip man gcc link386 tr
+		PATH LIBPATH) unless @make_code;
+
+$make_bold = join '|', @make_bold;
+$make_code = join '|', @make_code;
 
 debug("Module pod/pm discovery");
   
 $curdir = cwd;
 my $site_perl_prefix;
+my $libdir;
 
 if ((substr $Config{sitelib}, 0, length $Config{privlib}) 
     eq $Config{privlib}) {
@@ -43,13 +200,48 @@ if ((substr $Config{sitelib}, 0, length $Config{privlib})
   $site_perl_prefix =~ s!\\!/!g ;
 }
   
-libdir: foreach $libdir (@INC, $Config{bin}) {
-  chdir $libdir;
-  debug("Looking in $libdir:");
-  find (\&intern_modnamehash , '.');
-  chdir $curdir;
+if (@do_file) {
+  foreach $file (@do_file) {
+    # Fake File::Find
+    $File::Find::name = $_ = $file;
+    $libdir = ".";
+    intern_modnamehash();
+  }
 }
+%do_file_hash = %modnamehash;
+%old_hash = %modnamehash;
+{
+  no strict 'refs';
+  foreach (1 .. @add_dir/2) {
+    foreach $libdir (@{$add_dir[2*$_-1]}) {
+      do_libdir $libdir;
+    }
+    print STDERR "Doing section `$_' named `$add_dir[2*$_-2]': `@{$add_dir[2*$_-1]}'.\n" if $debug;
+    %{"do_dirs$ {_}_hash"} = hash_diff(\%old_hash, \%modnamehash);
+    $cat_descr{"do_dirs$_"} = $add_dir[2*$_-2];
+    %old_hash = %modnamehash;
+  }
+}
+
+if ($do_mods) {
+  foreach $libdir ( @INC ) {
+    do_libdir $libdir;
+  }
+  %mods_hash = hash_diff(\%old_hash, \%modnamehash);
+  %old_hash = %modnamehash;
   
+  my $regex = quotemeta $Config{sitelib};
+  foreach $key (keys %mods_hash) {
+    next unless $modnamehash{$key} =~ /^$regex/o;
+    $add_mods_hash{$key} = delete $mods_hash{$key};
+  }
+}
+
+foreach $libdir ( $do_bin ? ($Config{bin}, @bin_dirs) : () ) {
+  do_libdir $libdir;
+}
+%bin_hash = hash_diff(\%old_hash, \%modnamehash);
+
 @modnames = sort keys %modnamehash;
   
 print STDERR "Found `@modnames'.\n";
@@ -57,44 +249,59 @@ print STDERR "Found `@modnames'.\n";
 # %modnamehash now maps module name -> file name.
 # %moddesc now maps module name -> description.
   
-$DocTitle = 'Perl Manual';
+@files = ();
 
-@files =
-    ( # from perl.pod
-     #  file         section name
-     [ 'perl',      'Perl overview' ],
-     [ 'perlos2',      'Perl under OS/2' ],
-     #[ 'perltoc',   'Perl documentation table of contents' ],
-     [ 'perldata',  'Perl data structures' ],
-     [ 'perlsyn',   'Perl syntax' ],
-     [ 'perlop',    'Perl operators and precedence' ],
-     [ 'perlre',    'Perl regular expressions' ],
-     [ 'perlrun',   'Perl execution and options' ],
-     [ 'perlfunc',  'Perl builtin functions' ],
-     [ 'perlvar',   'Perl predefined variables' ],
-     [ 'perlsub',   'Perl subroutines' ],
-     [ 'perlmod',   'Perl modules' ],
-     [ 'perlref',   'Perl references' ],
-     [ 'perldsc',   'Perl data structures intro' ],
-     [ 'perllol',   'Perl data structures: lists of lists' ],
-     [ 'perlobj',   'Perl objects' ],
-     [ 'perltie',   'Perl objects hidden behind simple variables' ],
-     [ 'perlbot',   'Perl OO tricks and examples' ],
-     [ 'perldebug', 'Perl debugging' ],
-     [ 'perldiag',  'Perl diagnostic messages' ],
-     [ 'perlform',  'Perl formats' ],
-     [ 'perlipc',   'Perl interprocess communication' ],
-     [ 'perlsec',   'Perl security' ],
-     [ 'perltrap',  'Perl traps for the unwary' ],
-     [ 'perlstyle', 'Perl style guide' ],
-     [ 'perlxs',    'Perl XS application programming interface' ],
-     [ 'perlxstut', 'Perl XS tutorial' ],
-     [ 'perlguts',  'Perl internal functions for those doing extensions ' ],
-     [ 'perlcall',  'Perl calling conventions from C' ],
-     [ 'perlembed', 'Perl how to embed perl in your C or C++ app' ],
-     [ 'perlpod',   'Perl plain old documentation' ],
-     [ 'perlbook',  'Perl book information' ],
-    );
+if ($do_std and -f 'perl.pod') {
+  open MPOD, 'perl.pod';
+  @files = ();
+  while (<MPOD>) {
+    last if /sections/;
+  }
+  while (<MPOD>) {
+    last if /^\S/;
+    push @files, [$1, $2] if /^\s+(\S*)\s+(.*)/ and $1 ne 'perltoc';
+  }
+  close MPOD;
+  splice @files, 1, 0, [ 'perlos2',      'Perl under OS/2' ];
+  push @files, [ 'perlinstall',  'Installation/compilation of Perl'],
+               ['Pumpkin', 'Notes on handling the Perl Patch Pumpkin'];
+  if (-f '../INSTALL' and not -f 'perlinstall.pod') {
+      copy '../INSTALL', 'perlinstall.pod';
+  }
+  if (-f '../Porting/pumpkin.pod' and not -f 'Pumpkin.pod') {
+      copy '../Porting/pumpkin.pod', 'Pumpkin.pod';
+  }
+  if (-f '../README.os2' and not -f 'perlos2.pod') {
+      copy '../README.os2', 'perlos2.pod';
+  }
+  for $file (@files) {
+    push @pods, $file->[0];
+    $pod_hash{$file->[0]}++;
+    $moddesc{$file->[0]} = $file->[1];
+  }
+}
+
+foreach $module (keys %skipNAMEs) {
+  $skip_sections{"$module/NAME"}++;
+}
+
+#if ($do_tree) {
+#  create_tree([keys %modnamehash]);  
+#}
+
+my @std_categories = (qw(pod mods add_mods bin do_dirs),
+		      (map "do_dirs$_", 1 .. @add_dir/2),
+		      qw(do_file tree));
+print STDERR "Categories: `@std_categories'.\n" if $debug;
+
+$tree_hash{'::emit_tree'}++ if $do_tree;
+
+{
+  no strict 'refs';
+  for $cat (@std_categories) {
+    $categories{$cat} = \%{$cat . "_hash"} if %{$cat . "_hash"};
+  }
+}
 
 for $pod (@files) {
   $doing_pod{$pod->[0] . ".pod"}++;
@@ -109,7 +316,7 @@ for $pod (<*.pod>) {
 }
 
 for $pod (keys %not_doing_pod) {
-  print STDERR "!!! Unknown POD: `$pod'\n";
+  print STDERR "\n!!! Unknown POD: `$pod'\n" if $do_std;
 }
 
 for $name (sort {lc $a cmp lc $b or $a cmp $b} keys %modnamehash) {
@@ -134,16 +341,8 @@ for $name (sort {lc $a cmp lc $b or $a cmp $b} keys %modnamehash) {
      'perlvar/DESCRIPTION/Predefined Names',
     );
 
-$font = ''; #':font facename=Helv size=16x8.';
-
-$debug_xref = 0;
-$dump_xref = 0;
-$dump_contents = 0;
-$ref_delta = 1;     # start from 1
-$maxtoc = 5;
-$dots = 0;
-$multi_win = 1;     # 1 = use alternate window for toc
 $section_head[0] = '';		# To simplify warnings
+$section_head[1] = '';		# To simplify warnings
 
 %groups = (
 	   links => 1,
@@ -154,6 +353,7 @@ $section_head[0] = '';		# To simplify warnings
 	   r_camel => 6,
 	   sublinks => 7,
 	   about => 8,
+	   tree_nodes => 9,
 	  );
 
 %panelwidths = (		# Make a gap.
@@ -161,6 +361,14 @@ $section_head[0] = '';		# To simplify warnings
 		text => '69%',
 		sublinks => '28%',
 	       );
+
+# Pickup modules which are not plain words, so it is safer to
+# auto-crosslink them (with :: or _, or with mixed capitalization, or
+# without vowels with at least 3 letters - avoid B and Tk):
+$auto_link = join '|', grep /::|_|[a-z][A-Z]|^[^aAeEoOyYiIuU]{3,}$/, keys %addref;
+$auto_link_hard = join '|', grep !/::|_|[a-z][A-Z]|^[^aAeEoOyYiIuU]+$/, keys %addref;
+
+print STDERR "\nautolink: $auto_link\n" if $debug;
 
 sub out;
 sub contents;
@@ -170,6 +378,7 @@ sub findref;
 sub winhead;
 sub winlink;
 sub no_markup_len;
+sub insert_nl;
 
 $/ = "";
 
@@ -177,20 +386,30 @@ foreach $sc (@split_sections) { $as_head{$sc} = 1; }
 
 foreach $sc (@index_sections) { $fine_index{$sc} = 1; }
 
-# Insert the Logo page.
+if (not defined $DocTitle) {
+  $DocTitle = @files >= 2 ? 'Perl Manual' : $files[0][0];
+  $DocTitle = escape($DocTitle);
+}
+
+$in_item_header = 0;
 
 for ($pass = 1; $pass <= 2; $pass++) {
 
     $headno = 0; # make refs hash for this on first pass
 
     print STDERR "pass: $pass\n";
-    if ($pass == 2) {
-# We position burst window low, so it does not obsure Contents and/or
-# titles of information windows, and Contents does not obsure us
-# (completely).
-      print <<EOI;
+      print <<EOI if $pass == 2;
 :userdoc.
 :title.$DocTitle
+EOI
+
+    # Insert the Logo page.
+
+    if ($pass == 2 and $do_burst) {
+      # We position burst window low, so it does not obsure Contents and/or
+      # titles of information windows, and Contents does not obsure us
+      # (completely).
+      print <<EOI;
 :h1 group=$groups{logo} x=7% width=87% y=1% height=90% id=63999 scroll=none.Logo
 :i1.Logo
 :link reftype=hd refid=63998 auto split group=$groups{l_camel}
@@ -233,54 +452,134 @@ for ($pass = 1; $pass <= 2; $pass++) {
 :h2 hide noprint nosearch id=63996.Dummy
 :artwork align=center name='CamelGrayBig.BMP'.
 Do not forget that you can alway click on :hp9.Contents:ehp9., :hp9.Search:ehp9., and :hp9.Index:ehp9. buttons, (or use :hp8.Alt-t:ehp8., :hp8.Alt-s:ehp8., :hp8.Alt-i:ehp8. correspondingly).
+
+EOI
+    }
+    if ($pass == 2 and $do_about) {
+      print <<EOI;
 :h1 toc=1 group=$groups{about} x=center width=100% y=center height=20% id=63900.About
 Generated on @{[out(scalar localtime, 1)]}, by
 :link reftype=hd group=$groups{links} dependent vpx=left vpcx=$panelwidths{links} refid=@{[findrefid('perl')]}.Perl:elink.
 version $], 
 :link reftype=hd group=$groups{links} dependent vpx=left vpcx=$panelwidths{links} refid=@{[findrefid('pod2ipf')]}.pod2ipf:elink.
-version $VERSION.
+version $VERSION @{[format_args]} in directory @{[escape(cwd)]}.
 
 EOI
     }
-    for ($fn = 0; $fn <= $#files; $fn++) {
-        $fname = $files[$fn][0] . '.pod';
-	if (not -f $fname) {
-	  $fname = $modnamehash{$files[$fn][0]};
+    if ($head_off <= 1 or (keys %categories) <= 1) {
+      if ($head_off > 1) {
+	print <<EOP if $pass == 2;
+:h1 toc=$maxtoc group=$groups{links} x=left width=$panelwidths{links} id=63800.$DocTitle
+$DocTitle.
+
+EOP
+      }
+      for ($fn = 0; $fn <= $#files; $fn++) {
+	output_file($files[$fn][0]);
+      }
+    } else {
+      # Separate into categories:
+      my @titles;
+      for $cat (@std_categories) {
+	next unless $categories{$cat};
+	category_emit($cat) if $pass == 2;
+	@titles = sort {lc $a cmp lc $b or $a cmp $b} 
+		keys %{$categories{$cat}};
+	@titles = @pods if $cat eq 'pod'; # Preserve the sorting order
+	for $title (@titles) {
+	  if ($title eq '::emit_tree') {
+	    output_tree(create_tree([keys %modnamehash]), '', 2) if $pass == 2;
+	  } else {
+	    output_file($title);
+	  }
 	}
-        $page = $files[$fn][0];
+      }
+    }
+}
+
+print "\n:euserdoc.\n";
+
+if ($dump_xref) {
+    foreach (keys %links) {
+        print STDERR $_ . "->" . $links{$_} . "\n";
+    }
+}
+if ($dump_contents) {
+    for($i = 0; $i <= $#head; $i++) {
+        print STDERR "    " x $headlevel[$i], $head[$i], "\n";
+    }
+}
+if ($dump_manpages) {
+  my @arr = sort keys %unknown_manpages;
+  print STDERR "Unknown manpages: @arr.\n";
+}
+print STDERR "Found $foundrefs crosslinks.\n";
+
+sub category_emit {
+  my $cat = shift;
+  $cat_id ||= 63800;
+  $cat_id++;
+  print <<EOP;
+:h1 toc=$maxtoc group=$groups{links} x=left width=$panelwidths{links} id=$cat_id.$cat_descr{$cat}
+$cat_descr{$cat}.
+
+EOP
+}
+
+sub output_file {
+        my $ftitle = shift;
+        my $fcomment = $moddesc{$ftitle} || "Perl module $ftitle";
+	
+        $fname = $ftitle . '.pod';
+	if (not -f $fname) {
+	  $fname = $modnamehash{$ftitle};
+	}
+        $page = $ftitle;
         $toc = $maxtoc;
         
-        open(IN, $fname) || die "$fn: open `$fname': $!";
+        open(IN, $fname) || die "$ftitle: open `$fname': $!";
         print STDERR $fname . ": ";
         print STDERR "\n" if !$dots;
 
-        $section = $files[$fn][0] . ' - ' . $files[$fn][1];
+        $section = $ftitle . ' - ' . $fcomment;
         if ($pass == 1) {
             addsection($section, $headno, 1);
             addref($page, $headno);
-	    $is_head{$files[$fn][0]}++;
+	    $is_head{$ftitle}++;
         }
         $section_head[1] = $page;
         $path = $section_head[1];
         if ($pass == 2) {
-            print ":h1 toc=$toc " . winhead($headno)
+	    insert_nl;
+	    my $hlevel = $head_off >= 1 ? $head_off : 1;
+            print ":h$hlevel toc=$toc " . winhead($headno)
                 . " id=" . ($headno + $ref_delta) . "."
-                . out($section, 0) . "\n" . $font;
-            print ":i1." . out($section, 0) . "\n";
-            print ":i1." . out($files[$fn][0], 0) . "\n";
-        }
+                . out($section, 0) . "\n" . $font; # Headers take no fonts.
+            output_index($section, $ftitle);
+            output_index($ftitle, $ftitle);
+	    $was_nl = 1;
+	} else {
+	    count_index($section);
+	    count_index($ftitle);
+	}
         $headno++;
         
         @lstack = ();
         $emptypane = 1;
 	$inpod = 0;
         
-        PARA: while ($line = <IN>) {
+        PARA: while (defined ($line = <IN>)) {
             chomp $line;
-            if ($line =~ /^=head(\d+)\b\s*/) {
+	    if ($line =~ /^=\w+/) {
+	      if ($line =~ /^=head(\d+)\b\s*/) {
 	        $inpod = 1;
                 $nopara = 0;
                 $heading = $';
+		{
+		  $heading =~ s/\s*$//;	# localize $1
+		  $heading = untabify $heading;
+		}
+		
 		if (@lstack) {
 		  warn "List not finished (@lstack) in (@section_head[1..$hl]).\n"
 		    if $pass == 1;
@@ -288,8 +587,13 @@ EOI
                     $t = pop(@lstack);
                     if ($t eq 'ul') {
 		      print ":eul.\n" if $pass == 2;
+		      $was_nl = 1;
                     } elsif ($t eq 'ol') {
 		      print ":eol.\n" if $pass == 2;
+		      $was_nl = 1;
+                    } elsif ($t eq 'parml') {
+		      print ":eparml.\n" if $pass == 2;
+		      $was_nl = 1;
                     } elsif ($t eq 'head' or $t eq 'finehead') {
 		      $hl--;
 		      $path = join('/', @section_head[1..$hl]);
@@ -298,36 +602,50 @@ EOI
 		}
     
                 $hl = $1 + 1;
+                $section_head[$hl] = $heading;
+                $path = join('/', @section_head[1..$hl]);
+		$sh_path = join('/', @section_head[1..$hl-1]);
+		if ($skip_sections{$path}) {
+		  $inpod = 0;
+		  next PARA;
+		}
                 contents($hl, $headno) if $emptypane;
                 if ($pass == 1) {
                     addsection($heading, $headno, $hl);
-		    $plainheading = $heading;
 		    # XXXX Is wrong with some escapes:
-		    1 while $plainheading =~ s/[A-Z]<([^<>]*)>/$1/g;
-                    addref(qq|$page/"$plainheading"|, $headno);
-		    $is_head{$plainheading}++;
+		    #1 while $heading =~ s/[A-Z]<.*?>/$1/g;
+                    addref(qq|$page/"$heading"|, $headno);
+		    $is_head{$heading}++;
                 }
-                $section_head[$hl] = $heading;
-                $path = join('/', @section_head[1..$hl]);
                 if ($pass == 2) {
-                    print ":h$hl " . winhead($headno)
+		    insert_nl;
+                    print ":h", $hl + $head_off - 1 , " " . winhead($headno)
                         . " id=" . ($headno + $ref_delta) . "."
-                        . out($heading, 0) . "\n" . $font;
-                    print ":i1." . out($heading, 0) . "\n";
-                }
+                        . out($heading, 0) . "\n" . $font; # Headers take no fonts
+		    output_index($heading, $path);		    
+		} else {
+		    count_index($heading);
+		}
                 $headno++;
                 print STDERR "." if $dots;
                 $emptypane = 1;
-            } elsif ($line =~ /^=over\b/) {
+	      } elsif ($line =~ /^=over\b\s*/) {
 	        $inpod = 1;
+		$step = 5;	# Default
+		$step = $& if $' =~ /\d+/;
+		$step = int($step * 4/3 + 0.5); # Take into account proportional font
                 # look ahead, to see how the list should look like
                 chomp($line = <IN>);
-                if ($line =~ /^\=item\s+\*/) { # item *
+                if ($line =~ /^\=item(\s*$|\s+\*)/) { # item * (or empty)
                     push(@lstack, "ul");
+		    insert_nl if $pass == 2;
                     print ":ul.\n" if $pass == 2;
+		    $was_nl = 1;
                 } elsif ($line =~ /^\=item\s+1\.?/) {  # item 1. 
                     push(@lstack, "ol");
+		    insert_nl if $pass == 2;
                     print ":ol.\n" if $pass == 2;
+		    $was_nl = 1;
                 } elsif (defined($as_head{$path})) {
                     # in some cases we use headings instead of lists
                     warn "toc for $page, id=$headno too low" if ! $toc >= $hl + 1;
@@ -336,19 +654,29 @@ EOI
 		    $section_head[$hl] = 'list_start';
                     $eitems = "";
                 } else {
-                    push(@lstack, "ul");
-                    print ":ul.\n" if $pass == 2;
+                    push(@lstack, "parml");
+		    insert_nl if $pass == 2;
+                    print ":parml break=fit tsize=$step.\n" if $pass == 2;
+		    $was_nl = 1;
                 }
                 $nopara = 0;
                 redo PARA;
-            } elsif ($line =~ /^=back\b/) {
+	      } elsif ($line =~ /^=back\b/) {
 	        $inpod = 1;
                 if ($#lstack >= 0) {
                     $t = pop(@lstack);
                     if ($t eq 'ul') {
+		        insert_nl if $pass == 2;
                         print ":eul.\n" if $pass == 2;
+			$was_nl = 1;
                     } elsif ($t eq 'ol') {
+		        insert_nl if $pass == 2;
                         print ":eol.\n" if $pass == 2;
+			$was_nl = 1;
+                    } elsif ($t eq 'parml') {
+		        insert_nl if $pass == 2;
+                        print ":eparml.\n" if $pass == 2;
+			$was_nl = 1;
                     } elsif ($t eq 'head' or $t eq 'finehead') {
                         $hl--;
 			$path = join('/', @section_head[1..$hl]);
@@ -358,15 +686,21 @@ EOI
                     $hl--;
                 }
                 $nopara = 0;
-            } elsif ($line =~ /^=item\b\s*/) {
+	      } elsif ($line =~ /^=item\b\s*/) {
 	        $inpod = 1;
                 $nopara = 0;
                 $heading = $';
+		$heading =~ s/\s+$//;
+		$heading = untabify($heading);
                 $headx = $heading;
+		$headx =~ s/E<(.*?)>/$HTML_Escapes{$1}/ge; # Primitive: $<digit>
+		1 while $headx =~ s/[A-Z]<(.*?)>/$1/g; # Primitive: $<digit>
                 print STDERR "." if $dots;
 		if ($#lstack == -1) {
-                    push(@lstack, "ul");
-                    print ":ul.\n" if $pass == 2;
+                    push(@lstack, "parml");
+		    insert_nl if $pass == 2;
+                    print ":parml break=fit tsize=7.\n" if $pass == 2;
+		    $was_nl = 1;
 		    warn "An =item without =over in (@section_head[1..$hl])\n" 
 		}
                 if ($lstack[$#lstack] eq 'head'
@@ -376,8 +710,9 @@ EOI
                     # lowest level never empty, IPFC uses next page
                     # by default (but Back button doesn't work :-()
                     $emptypane = 0;
-
-		    $headx =~ /(\w+)/;
+		    
+		    my ($word1, $word2);
+		    $headx =~ /(\^?\w+)/; # $^A
 		    $word1 = $1;
 		    $headx =~ /(\S+)/;
 		    $word2 = $1;
@@ -389,21 +724,23 @@ EOI
                     }
                     $section_head[$hl] = $heading;
                     $path = join('/', @section_head[1..$hl]);
-                    if ($pass == 2) {
-                        print ":h$hl " . winhead($headno)
-                            . " id=" . ($headno + $ref_delta) . "."
-                            . out($heading, 0) . "\n" . $font;
-                        print ":i1." . out($heading, 0) . "\n";
-			$is_head{$heading}++; # XXXX Need to strip?
-			if ($#lstack >= 0 
-			    and $lstack[$#lstack] eq 'finehead') {
-			  print ":i1." . out($word1, 0) . "\n" 
-			    if defined $word1 and $word1 ne $heading;
-			  print ":i1." . out($word2, 0) . "\n" 
-			    if defined $word2 and $word2 ne $heading
-			      and $word2 ne $word1;
-			}
-                    }
+		    $sh_path = join('/', @section_head[1..$hl-1]);
+		    insert_nl if $pass == 2;
+		    print ":h", $hl + $head_off - 1, " " . winhead($headno)
+		      . " id=" . ($headno + $ref_delta) . "."
+			. out($heading, 0) . "\n" . $font 
+			  if $pass == 2; # Headers take no fonts
+		    output_index($heading, $path);		    
+		    $was_nl = 1;
+		    if ($#lstack >= 0 
+			and $lstack[$#lstack] eq 'finehead') {
+		      output_index($word1, $path)
+			if defined $word1 and $word1 ne $heading;
+		      output_index($word2, $path)		    
+			if defined $word2 and $word2 ne $heading
+			  and $word2 ne $word1;
+		    }
+		    $is_head{$heading}++ if $pass == 1; # XXXX Need to strip?
                     $headno++;
 
                     # look ahead to see if this =item is empty.
@@ -422,49 +759,59 @@ EOI
                         }
                     }
                     redo PARA;
-                } else {
+                } else {	# Different list's items
+		    local $in_item_header = 1;
                     $emptypane = 0;
 		    addref(qq|$page/"$headx"|, $headno, 1);
                     if ($lstack[$#lstack] eq 'ul' && $heading =~ /^\s*\*\s*(.*)$/ or
                         $lstack[$#lstack] eq 'ol' && $heading =~ /^\s*\d+\.?\s*(.*)$/)
-                    {
-                        if ($pass == 2) {
-                            print ":li.";
+		      {		# Bulleted or numbered item matching list type.
+                            print ":li." if $pass == 2;
                             $heading = $1;
                             if ($1 ne "") {
-                                
-                                print out($heading, 1) . "\n";
-                                print ":i1." . out($heading, 0) . "\n"
+                                print out($heading, 1) . "\n" if $pass == 2;
+				output_index($heading, $path)
 				  unless $is_head{$heading};
+				$was_nl = 1;
                             } else {
                                 $nopara = 1;
+				$was_nl = 0;
                             }
-                        }
-                    } else {
-                        if ($pass == 2) {
-                            print ":li." . out($heading, 1) . "\n";
-                            print ":i1." . out($heading, 0) . "\n"
-				  unless $is_head{$heading};
-                        }
-                    }
+		      } elsif ($lstack[$#lstack] eq 'parml') {
+			print ":pt." if $pass == 2;
+			$heading =~ s/^\s*\*?\s+//;
+			$heading =~ s/\s+$//;
+			$heading = '*' if $heading eq '';
+			print out($heading, 1) . "\n" if $pass == 2;
+			output_index($heading, $path)
+			  unless $is_head{$heading} or $heading eq '*' or $heading eq '';
+			print ":pd." if $pass == 2;
+			$nopara = 1;
+			$was_nl = 0;
+		      } else {
+			  print ":li." . out($heading, 1) . "\n" if $pass == 2;
+			  output_index($heading, $path)
+			    unless $heading eq '' or $heading eq '*' or $is_head{$heading};
+			  $was_nl = 1;
+			  $nopara = 1;
+		      }
                 }
-            } elsif ($line =~ /^=cut/) {
+	      } elsif ($line =~ /^=cut/) {
 	        $inpod = 0;
-            } elsif ($line =~ /^=pod/) {
+	      } elsif ($line =~ /^=pod/) {
 	        $inpod = 1;
-            } elsif ($line =~ /^=\w+/) {
+	      } else {
                 warn "what to do with '$line'?\n";
+	      }
             } elsif ($inpod == 0) {
 	      # Just ignore this chunk
             } elsif ($line =~ /^\s+\S/) {
                 if ($pass == 2) {
-                    @tlines = split(/\n/, $line);
-                    foreach $tline (@tlines) {
-                        1 while $tline =~ s/\t+/' 'x (length($&) * 8 - length($`) % 8)/e;
-                    }
-                    $pre = join("\n", @tlines);
-                    print "\n:xmp.\n" . escape($pre) . ":exmp.";
-                }
+                    $pre = untabify($line);
+		    insert_nl;
+                    print ":xmp.\n" . escape_with_url($pre) . "\n:exmp.\n";
+		    $was_nl = 1;
+		}
                 $nopara = 0;
                 $emptypane = 0;
             } elsif ($line =~ /^\s+\S/m) { # see perl(run)?/SYNOPSIS for this
@@ -476,20 +823,19 @@ EOI
                     # no_markup_len tries to guess the # of ' ' to next tab,
                     # but even when the guess is correct, things don't seem
                     # to align when bold,.. is used :-(
-                    @tlines = split(/\n/, $mark);
-                    foreach $tline (@tlines) {
-                        1 while $tline =~ s/\t+/' 'x (length($&) * 8 - &no_markup_len($`) % 8)/e;
-                    }
-                    $pre = join("\n", @tlines);
+                    $pre = untabify_after($mark);
                     
-                    print "\n:xmp.\n" . $pre . ":exmp.";
+		    insert_nl;
+                    print ":xmp.\n" . $pre . "\n:exmp.\n";
+		    $was_nl = 1;
                 }
                 $nopara = 0;
                 $emptypane = 0;
             } else {
                 if ($pass == 2) {
-                    print ":p." if !$nopara;
-                    print out($line, 1);
+                    print ":p.\n" unless $nopara;
+                    print out(untabify($line), 1);
+		    $was_nl = 0;
                 } else {
                     if ($line =~ /^\s+$/) {
                         warn "line with blanks in $page, id=$headno\n";
@@ -502,27 +848,165 @@ EOI
         close(IN);
         print STDERR "\n" if $dots;
     }
-}
-print "\n:euserdoc.\n";
 
-if ($dump_xref) {
-    foreach (keys %links) {
-        print STDERR $_ . "->" . $links{$_} . "\n";
+sub output_tree {
+  my ($tree, $prefix, $level) = @_;
+  my ($node, $mod);
+  foreach $node (sort keys %$tree) {
+    $cat_id++;
+    if ($prefix eq '') {
+      $mod = substr $node, 2;
+    } else {
+      $mod = "$prefix$node";      
     }
+    if (ref $tree->{$node}) {	# Subtree
+      print <<EOP;
+:h$level group=$groups{tree_nodes} x=left width=10% y=top height=10% id=$cat_id.@{[escape $mod]}...
+
+EOP
+      output_tree($tree->{$node}, $mod, $level + 1);
+    } else {
+      print <<EOP;
+:h$level group=$groups{tree_nodes} x=left width=10% y=top height=10% id=$cat_id.@{[escape $mod]}
+:link reftype=hd group=$groups{links} auto vpx=left vpcx=$panelwidths{links} refid=@{[findrefid($mod)]}.
+@{[escape $mod]}
+
+EOP
+    }
+  }
 }
-if ($dump_contents) {
-    for($i = 0; $i <= $#head; $i++) {
-        print STDERR "    " x $headlevel[$i], $head[$i], "\n";
+
+sub untabify {
+  my @tlines = split(/\n/, shift);
+  my $tline;
+  foreach $tline (@tlines) {
+    1 while $tline =~ s/\t+/' 'x (length($&) * 8 - length($`) % 8)/e;
+  }
+  join("\n", @tlines);
+}
+
+sub untabify_after {		# Some markup is already there.
+  my @tlines = split(/\n/, shift);
+  my $tline;
+  foreach $tline (@tlines) {
+    1 while $tline =~ s/\t+/' 'x (length($&) * 8 - &no_markup_len($`) % 8)/e;
+  }
+  join("\n", @tlines);
+}
+
+{
+  my $id_c = 0;
+  sub i1id {
+    return $i1ids{$_[0]} if exists $i1ids{$_[0]};
+    $i1ids{$_[0]} = "id_" . ++$id_c;
+  }
+}
+
+sub output_index {
+  return &count_index if $pass == 1;
+  my ($heading, $path) = (shift, shift);
+  if ($index_seen{$heading} > 1) {
+    my $id = $i1ids{$heading};
+    unless ($id) {
+      $id = i1id($heading);
+      print ":i1 id=$id." . out($heading, 0) . "\n";
     }
+    print ":i2 refid=$id." . out("[$path]", 0) . "\n" 
+      unless $index_output{$id}{$headno}++;
+  } else {
+    print ":i1." . out($heading, 0) . "\n";    
+  }
+}
+
+sub count_index { $index_seen{shift()}++ }
+
+sub maybe_link {
+  my $txt = shift;
+  exists $links{findref($txt)} ? "L<$txt>" : $txt;
+}
+
+sub strip {
+    my $in = shift;
+
+    1 while $in =~ s/[A-Z]<([^<>]*)>/$1/;
+    
+    return $in;
+}
+
+sub try_external_link {
+    my $txt = shift;
+    print STDERR "trying `$txt'" if $debug;
+    
+    if ($txt =~ m,^(http|file|ftp|mailto|news|newsrc|gopher)://,) {
+	my $link = strip($txt);
+	return 
+	  ":link reftype=launch object='lynx.exe' data='$link'."
+	    . out($txt) . ":elink.";
+
+    } elsif ($txt =~ m,^\"(http|file|ftp|mailto|news|newsrc|gopher)://, 
+	     and $txt =~ /\"$/) {
+	my $link = strip(substr $txt, 1, length($text) - 2);
+	return 
+	  ":link reftype=launch object='lynx.exe' data='$link'."
+	    . out($txt) . ":elink.";
+
+    } elsif ($txt =~ m,^(\w+)\([23]\)|POSIX\s*\(3\)/(\w+)|(emx\w+)$,i) {
+	return 
+	  ":link reftype=launch object='view.exe' data='emxbook $+'."
+	    . out($txt) . ":elink.";
+    }
+    return undef;
+}
+
+sub auto_beautify {
+    my $para = $_[0];
+    # We start with links to make as many of them as we can:
+    $para =~ s/(^|[^<:\$@%])\b($auto_link)\b(?=$|[^>:]|:[^:])/$1L<$2>/go 
+      if $auto_link;
+    # perl(1) Tix(n)
+    $para =~ 
+      s/ (^|[^<]) \b ( [\w:]+ \b \([\dn]\) ) (?=$|[^>]) /$1 . maybe_link($2)/gxe;
+    # words in "SEE ALSO"
+    $para =~ s/ (^|[^<]) \b ( $auto_link_hard ) \b (?=$|[^>]) /$1L<$2>/gox
+	if $section_head[$hl] eq "SEE ALSO";
+    # Link sections which are highlighted
+    $para =~ s/([CBI])<($auto_link)>/$1<L<$2>>/go if $auto_link;
+    $para =~ s/C<-(\w)>/C<L<-$1>>/g;
+    $para =~ s/ ^ ( $auto_link_hard ) $  /L<$1>/ox 
+      if $in_item_header and $auto_link_hard;
+    # URLs inside F<>
+    $para =~ s, F< ((http|file|ftp|mailto|news|newsrc|gopher):// [^\s<>]* ) > 
+              ,L<$1>,xg ;
+    # free-standing URLs.
+    $para =~ s% ( \s | ^ ) 
+                ( (?:http|file|ftp|mailto|news|newsrc|gopher)
+		  :// 
+		  [^\s<>]* 
+		  [^\s.,:;!?\"\'\)] # Strip trailing punctuation.
+		)
+                ( [.,:;!?\"\'\)]* ( \s | $ ) | $ )
+              %$1L<$2>$3%xg ;
+    # <> below is to avoid BOLDing of C in C<>
+    $para =~ s/(^|[^<:\$@%])\b($make_bold)\b(?=$|[^<>:]|:[^:])/$1B<$2>/go 
+      if $make_bold;
+    $para =~ s/(^|[^<:\$@%])\b($make_code)\b(?=$|[^>:]|:[^:])/$1C<$2>/go 
+      if $make_code;
+    $para =~ s/ (\s+ | ^) ( [$%@] [\w:]+ \b) (?=$|[^>]) /$1C<$2>/gx; # $var
+    $para =~ s/ (^|[^<]) \b ( [\w:]+ \b \(\) ) (?=$|[^>]) /$1C<$2>/gx; # func()
+    $para;
 }
 
 sub out {
     my $para = $_[0];
     my $markup = $_[1];
+    my $beautify = $markup && ! $_[2];
     my @stack = ();
     my $output = "";
+    my ($c, $cpos, $opos);
 
     return if ($pass == 1);
+    
+    $para = auto_beautify($para) if $beautify;
     
     $cpos = 0;
     $opos = 0;
@@ -540,26 +1024,37 @@ sub out {
                 next TAG;
             }
             if ($c eq 'B') {
+	      if (grep {$_ eq 'I'} @stack) {
+                $output .= ':hp3.' if $markup;
+                push (@stack, 'BI');
+	      } else {
                 $output .= ':hp2.' if $markup;
                 push (@stack, $c);
+	      }
             } elsif ($c eq 'F') {
-                $output .= ':hp2.' if $markup;
+                $output .= ':hp6.' if $markup;
                 push (@stack, $c);
             } elsif ($c eq 'S') {
                 $output .= ':hp2.' if $markup;
                 push (@stack, $c);
             } elsif ($c eq 'I') {
+	      if (grep {$_ eq 'B'} @stack) {
+                $output .= ':hp3.' if $markup;
+                push (@stack, 'BI');
+	      } else {
                 $output .= ':hp1.' if $markup;
                 push (@stack, $c);
+	      }
             } elsif ($c eq 'C') {
-                $output .= ':hp2.' if $markup;
+                $output .= ':font facename=Courier size=18x10.' if $markup;
                 push (@stack, $c);
             } elsif ($c eq 'L') {
                 my $link;
 	        #push (@stack, $c);
                 # link
                 pos $para = $cpos;
-                if ($para =~ m/\G([^>]+)\>/g) {
+		# Allow one level of included modifiers:
+                if ($para =~ m/\G(([A-Z]<[^<>]*>|[^>])+)\>/g) {
                     $cpos = pos $para;
                     $link = $1;
                     $foundlink = findref($link); 
@@ -570,23 +1065,36 @@ sub out {
                         $output .= ":link reftype=hd refid=" .
                             ($links{$foundlink} + $ref_delta) . '.'
                             if $markup;
-                        $output .= escape($blink);
+                        $output .= out1($blink);
                         $output .= ":elink." if $markup;
-                    } else {
+                    } elsif ($foundlink = try_external_link($link)) {
+                        $output .= $foundlink if $markup;
+		    } else {
                         warn "   unresolved link: $link\n";
-                        $output .= escape($link);
+                        $output .= out1($link);
                     }
                 }
             } elsif ($c eq 'E') {
                 pos ($para) = $cpos;
-                if ($para =~ m/\G([A-Za-z]+)>/g) {
+                if ($para =~ m/\G(([A-Za-z]+)|\d+)>/g) {
                     my $esc;
                     $cpos = pos $para;
-
-                    $esc = exists $HTML_Escapes{$1} ? $HTML_Escapes{$1} : "E<$1>";
+		    if (defined $2) {
+		      $esc = exists $HTML_Escapes{$1} 
+		        ? $HTML_Escapes{$1} : "E<$1>";
+		    } else {
+		      $esc = chr $1;
+		    }
                     $output .= escape($esc);
                 } else {
-                    warn "$fname: E<> ???\n";
+                    warn "$fname: E<> ??? `" . (substr $para, $cpos-2, 10) . "'\n";
+                }
+            } elsif ($c eq 'Z') {
+                pos ($para) = $cpos;
+                if ($para =~ m/\G>/g) {
+                    $cpos = pos $para;
+                } else {
+                    warn "funny: Z<...> ???\n";
                 }
             } else {
                 warn "$fname: what to do with $c<> ?\n";
@@ -598,13 +1106,153 @@ sub out {
             if ($c eq 'B') {
                 $output .= ':ehp2.' if $markup;
             } elsif ($c eq 'F') {
-                $output .= ':ehp2.' if $markup;
+                $output .= ':ehp6.' if $markup;
             } elsif ($c eq 'S') {
                 $output .= ':ehp2.' if $markup;
             } elsif ($c eq 'I') {
                 $output .= ':ehp1.' if $markup;
+            } elsif ($c eq 'BI') {
+                $output .= ':ehp3.' if $markup;
             } elsif ($c eq 'C') {
+                $output .= ':font facename=default size=0x0.' if $markup;
+            } elsif ($c eq 'L') {
+                # end link
+            } else {
+                $output .= escape('>');
+            }
+        } else {
+            $output .= escape(substr($para, $opos, $cpos - $opos));
+        }
+        pos($para) = $opos = $cpos;
+    }
+    $output .= escape(substr($para, $opos, length($para) - $opos));
+    if (!$markup) { # for toc/index/...
+        $output =~ s/\n\s*/ /g;
+        $output = substr($output, 0, 140); # strip too long stuff
+    }
+    $output =~ s/^\./&per./;	# period
+    return $output;
+}
+
+# Another copy of out, since currently you cannot recurse into a function using pos().
+sub out1 {
+    my $para = $_[0];
+    my $markup = $_[1];
+    my @stack = ();
+    my $output = "";
+    my ($c, $cpos, $opos);
+
+    return if ($pass == 1);
+
+    $para = auto_beautify($para);
+        
+    $cpos = 0;
+    $opos = 0;
+    TAG: while ($para =~ m{([<>])}g) { # ;-) ;-)
+        $cpos = pos $para;
+        $c = $1;
+        
+        if ($c eq '<' && $cpos >= 0) {
+            $output .= escape(substr($para, $opos, $cpos - $opos - 2));
+            
+            $c = substr($para, $cpos - 2, 1);
+            if ($c !~ /[A-Z]/) {
+                $output .= escape($c . '<');
+                pos($para) = $opos = $cpos;
+                next TAG;
+            }
+            if ($c eq 'B') {
+	      if (grep {$_ eq 'I'} @stack) {
+                $output .= ':hp3.' if $markup;
+                push (@stack, 'BI');
+	      } else {
+                $output .= ':hp2.' if $markup;
+                push (@stack, $c);
+	      }
+            } elsif ($c eq 'F') {
+                $output .= ':hp6.' if $markup;
+                push (@stack, $c);
+            } elsif ($c eq 'S') {
+                $output .= ':hp2.' if $markup;
+                push (@stack, $c);
+            } elsif ($c eq 'I') {
+	      if (grep {$_ eq 'B'} @stack) {
+                $output .= ':hp3.' if $markup;
+                push (@stack, 'BI');
+	      } else {
+                $output .= ':hp1.' if $markup;
+                push (@stack, $c);
+	      }
+            } elsif ($c eq 'C') {
+                $output .= ':font facename=Courier size=18x10.' if $markup;
+                push (@stack, $c);
+            } elsif ($c eq 'L') {
+                my $link;
+	        #push (@stack, $c);
+                # link
+                pos $para = $cpos;
+		# Allow one level of included modifiers:
+                if ($para =~ m/\G(([A-Z]<[^<>]*>|[^>])+)\>/g) {
+                    $cpos = pos $para;
+                    $link = $1;
+                    $foundlink = findref($link); 
+                    if (defined $links{$foundlink}) {
+		        my $blink = $link;
+			$blink =~ s|^"(.+)"$|$1|sm or
+			  $blink =~ s|^([-\w:]+)/"(.+)"$|$1: $2|sm;
+                        $output .= ":link reftype=hd refid=" .
+                            ($links{$foundlink} + $ref_delta) . '.'
+                            if $markup;
+                        $output .= out2($blink);
+                        $output .= ":elink." if $markup;
+                    } elsif ($foundlink = try_external_link($link)) {
+                        $output .= $foundlink if $markup;
+                    } else {
+                        warn "   unresolved link: $link\n";
+                        $output .= out2($link);
+                    }
+                }
+            } elsif ($c eq 'E') {
+                pos ($para) = $cpos;
+                if ($para =~ m/\G(([A-Za-z]+)|\d+)>/g) {
+                    my $esc;
+                    $cpos = pos $para;
+		    if (defined $2) {
+		      $esc = exists $HTML_Escapes{$1} 
+		        ? $HTML_Escapes{$1} : "E<$1>";
+		    } else {
+		      $esc = chr $1;
+		    }
+                    $output .= escape($esc);
+                } else {
+                    warn "$fname: E<> ??? `" . (substr $para, $cpos-2, 10) . "'\n";
+                }
+            } elsif ($c eq 'Z') {
+                pos ($para) = $cpos;
+                if ($para =~ m/\G>/g) {
+                    $cpos = pos $para;
+                } else {
+                    warn "funny: Z<...> ???\n";
+                }
+            } else {
+                warn "$fname: what to do with $c<> ?\n";
+            }
+        } elsif ($c eq '>' && $#stack >= 0) {
+            $output .= escape(substr($para, $opos, $cpos - $opos - 1));
+            
+            $c = pop(@stack);
+            if ($c eq 'B') {
                 $output .= ':ehp2.' if $markup;
+            } elsif ($c eq 'F') {
+                $output .= ':ehp6.' if $markup;
+            } elsif ($c eq 'S') {
+                $output .= ':ehp2.' if $markup;
+            } elsif ($c eq 'I') {
+                $output .= ':ehp1.' if $markup;
+            } elsif ($c eq 'BI') {
+                $output .= ':ehp3.' if $markup;
+            } elsif ($c eq 'C') {
+                $output .= ':font facename=default size=0x0.' if $markup;
             } elsif ($c eq 'L') {
                 # end link
             } else {
@@ -623,6 +1271,8 @@ sub out {
     return $output;
 }
 
+sub out2 {escape (shift)}
+
 sub contents {
     my $level = $_[0];
     my $no = $_[1];
@@ -639,38 +1289,55 @@ sub contents {
 
     $toplevel = $headlevel[$i];
 
-    print ":p." . out($head[$i], 0) . "\n";
+    print ":p." . out($head[$i], 1) . "\n";
+    $was_nl = 1;
     $i++;
     $cl = $toplevel;
     for (; $i <= $#head && $headlevel[$i] > $toplevel; $i++) {
         if ($headlevel[$i] > $cl) {
             warn "bad nesting: $toplevel, $headlevel[$i], $cl, $i, `$head[$i]`\n" if $headlevel[$i] != $cl + 1;
             print ":ul compact.\n";
+	    $was_nl = 1;
             $cl++;
         } elsif ($cl > $headlevel[$i]) {
             while ($cl > $headlevel[$i]) {
                 print ":eul.\n";
+		$was_nl = 1;
                 $cl--;
             }
         }
         print ":li.:link reftype=hd " . winlink($i)
             . " refid=" . ($i + $ref_delta) . "."
-            . out($head[$i], 1) . ":elink.\n";
+            . out($head[$i], 1, 1) . ":elink.\n";
+	$was_nl = 1;
     }
 
     while ($cl > $toplevel) {
         print ":eul.\n";
         $cl--;
+	$was_nl = 1;
     }
 }
 
-sub findrefid { $links{findref(shift)} + $ref_delta }
+sub findrefid {
+  my $in = shift;
+  my $out = $links{findref($in)};
+  warn "No refid for `$in'\n" if $debug and not defined $out;
+  ($out || 0) + $ref_delta;
+}
 
 sub findref { # various heuristics to get a valid link
     my $link = $_[0];
     
     $link =~ tr/\n/ /;
     print STDERR "link: $link\n" if $debug_xref;
+    if (!defined $links{$link}) {
+      if ($link =~ m|\.pod/|) {
+	$link = "$`/$'";	# Remove .pod from page name
+      } elsif ($link =~ m|\.pod$| and defined $links{$`}) {
+	$link = $`;
+      }
+    }
     if (!defined $links{$link}) { # try harder
         if (defined $links{qq|$page/"$link"|}) {
             $link = qq|$page/"$link"|;
@@ -684,8 +1351,9 @@ sub findref { # various heuristics to get a valid link
             $link = qq|$1/"$2"|;
         } elsif (exists $addref{$link} and exists $links{$addref{$link}}) {
             $link = $addref{$link};
-        } else {
-        }
+	} elsif ($link =~ /^-\w$/) {
+	    $link = qq|perlfunc/"-X"|;
+	}
         if ($link =~ m|^([^/ ]+)/"([^\"]+)"$| && !defined $links{$link}) {
             my $a = $1;
             my $b = $2;
@@ -696,11 +1364,14 @@ sub findref { # various heuristics to get a valid link
             if (defined $links{$linka}) {
                 $link = $linka;
             }
-	} elsif ($link =~ /\([13]\)$/ && defined $links{$`}) {	# perl(1)
+	} elsif ($link =~ /\([\dn]\)$/ && defined $links{$`}) {	# perl(1)
 	  $link = $`;
+	} elsif ($link =~ /\([\dn]\)$/) {
+	  $unknown_manpages{$link}++;
 	}
         print STDERR "trans: $link\n" if $debug_xref;
     }
+    $foundrefs++ if defined $links{$link};
     return $link;
 }
 
@@ -708,8 +1379,16 @@ sub addref {
     my $page = $_[0];
     my $num = $_[1];
     my $check = $_[2];
+
+    $page =~ s/\s*$//;
     
     $links{$page} = $num unless $check and exists $links{$page};
+    if ($page =~ /[A-Z]</) {
+      1 while $page =~ s/[A-Z]<(.*?)>/$1/;
+      $links{$page} = $num unless $check and exists $links{$page};
+    }
+    my $b = auto_beautify($page);
+    $links{$b} = $num unless $b eq $page;
 }
 
 sub addsection {
@@ -729,13 +1408,39 @@ sub escape {
     return $l;
 }
 
+sub remove_colon {
+    my $in = shift;
+    $in =~ s/\&colon\./:/g;
+    $in;
+}
+
+sub escape_with_url {
+    my $l = escape(shift);
+
+    $l =~ s% ( \s | ^ ) 
+             (
+	      (?:http|file|ftp|mailto|news|newsrc|gopher)
+	      \&colon\.//
+	      [^\s<>]* 
+	      [^\s.,:;!?\"\'\)] # Strip trailing punctuation.
+	     )
+             ( [.,:;!?\"\'\)]* ( \s | $ ) | $ )
+           % "$1:link reftype=launch object='lynx.exe' data='" 
+	     . remove_colon($2)
+	     . "'.$2:elink.$3" 
+           %xeg ;
+
+    return $l;
+}
+
 BEGIN {
-    %HTML_Escapes =
+    %HTML_Escapes =		# We provide a _practical_ list.
         (
          'amp'	=>	'&',	#   ampersand
          'lt'	=>	'<',	#   left chevron, less-than
          'gt'	=>	'>',	#   right chevron, greater-than
          'quot'	=>	'"',	#   double quote
+	 39	=>	"'",	#   single quote
         );
 }
 
@@ -771,6 +1476,19 @@ sub no_markup_len { # quick hack
     return length $l;
 }
 
+sub insert_nl {
+  print "\n" if not $was_nl or shift;
+  $was_nl = 1;
+}
+
+sub do_libdir {
+  local $_;
+  $libdir = shift;
+  chdir $libdir;
+  debug("Looking in $libdir:");
+  find (\&intern_modnamehash , '.');
+  chdir $curdir;
+}
 
 sub intern_modnamehash {
 # File::Find is pretty screwy.
@@ -792,12 +1510,14 @@ sub intern_modnamehash {
 
 # XXX - may be doing toplevel modules incorrectly in the above case
 # is 'name' just the filename?  thats not good ....
-    local $_ = $File::Find::name;
     $shortpath = $_;
+    local $_ = $File::Find::name;
 
 # kill leading './'
 
     s{^[.]/}{};
+    my $longname = "$libdir/$_";
+    $longname =~ s{^[.]/}{};
 
 # XXX - take the current $libdir (/foo/bar) 
 # and see if the file were testing (/foo/bar/site_perl/Plugh/Blah.pm) is
@@ -811,7 +1531,7 @@ sub intern_modnamehash {
 # if the other library is part of the current files path, skip it
 # because it will be caught when the other library is used
 
-	if ("$libdir/$_" =~ /^$otherlibrary/) {
+	if ($longname =~ /^$otherlibrary/) {
 	    print STDERR ".";
 #	    print "Skipping $_\n";
 #	    print "cuz $otherlibrary caught/will catch it\n";
@@ -819,12 +1539,12 @@ sub intern_modnamehash {
 	}
     }
 
-# exclude base pods - perlfoo.pod
-    /perl.*[.]pod/ && return;
+# exclude base pods - perlfoo.pod - but not perlfaq.
+    /perl(?!faq).*[.]pod/ && $do_std && return;
 
 # for each file entry, kill trailing '.(pod|pm|cmd)'
-    (-f "$libdir/$_") &&
-	s{^(.*)[.](pod|pm|cmd)$ }{$1}x or return;
+    (-f $shortpath) &&
+	s{^(.*)[.](pod|pm|cmd|bat)$ }{$1}x or return;
 
 # '.pod' files nonhierarchical - keep only last component as module name.
 # well, hierarchical in Tk ... keep it hierarchical for now
@@ -848,9 +1568,6 @@ sub intern_modnamehash {
 #	print "in $modnamehash{$_}\n";
 	return
     };
-    $seen{lc $_}++;
-
-    $modnamehash{$_} = "$libdir/$shortpath";
 
 # If this is a .pm file, is there actually any documentation in it?
 
@@ -858,14 +1575,14 @@ sub intern_modnamehash {
 # .bat as well. Since we look into $Config{bin}, we may allow files
 # without extension as well, if they are text files.
     
-	if ($modnamehash{$_} =~ /[.](pm|cmd|bat)$/i
-	    or $modnamehash{$_} !~ /[.]/ and -T $modnamehash{$_}) {
+	if ($longname =~ /[.](pm|cmd|bat|pod)$/i
+	    or $longname !~ /[.]/ and -T $longname) {
 	    $good = 0;
-	    open(MODULE, "$modnamehash{$_}");
-	  line: while ($theline = <MODULE>) {
+	    open(MODULE, $shortpath) or die "Cannot open `$shortpath': $!";
+	  line: while (defined ($theline = <MODULE>)) {
 		$theline =~ /^=head\d/ and $good = 1 and last line;
-		eof(MODULE) && delete $modnamehash{$_};
 	    }
+	    $used_name = $_;
 	    if ($good and $theline =~ /^=head\d\s+NAME\b/ ) {
 	      my @addrefs;
 	      
@@ -873,40 +1590,48 @@ sub intern_modnamehash {
 	      $theline = "";
 	      $theline = <MODULE> while defined $theline and $theline !~ /\S/;
 	      # Now have the name, find the description:
-	      if ($theline =~ /^(\S+)((,\s+\S+)*)\s*-\s*(.*)/ ) {
+	      if ($theline =~ /^((\S+)(,\s+\S+)*)\s*-\s*(.*)/ ) {
 		my $desc = $4;
 		my $skipNAME;	# safe to skip NAME section
-		if (lc($_) eq lc($1)) {
-		  $skipNAME = ! defined $2;
-		  # Prefer the name on the line over the file name:
-		  if ($_ ne $1) {
-		    $modnamehash{$1} = $modnamehash{$_};
-		    delete $modnamehash{$_};
-		    $_ = $1;
-		  }
-		  # Now process additional names this manpage may appear under.
-		  @addrefs = ($2 =~ /([\w:]+)/g);
-		  while ($theline = <MODULE> and not $theline =~ /\A=/) {
-		    if ($theline =~ /^((\S+)(,\s+\S+)*)\s*-\s*(.*)/) {
-		      push @addrefs, ($1 =~ /([\w:]+)/g);
-		      $skipNAME = 0;
-		    } elsif ($theline =~ /\S/) {
-		      $skipNAME = 0;
-		    }
-		  }
-		  @addref{@addrefs} = ($_) x @addrefs;
+		if (lc($used_name) eq lc($2)) {
+		  $skipNAME = length($2) == length($1);
 		  # dumpValue(\%addref);
 		} else {
-		  print STDERR "!!! Not matching: `$_' vs. `$1'\n";
+		  print STDERR "\n!!! Not matching: `$_' vs. `$2'\n";
 		}
-		$moddesc{$_} = $desc;
-		$skipNAMEs{$_} = $skipNAME;
+		$firstline_name = $2;
+		# Now process additional names this manpage may
+		# appear under (first from the first line only):
+		@addrefs = ($1 =~ /([\w:]+)/g);
+		# Second from additional lines
+		while (defined ($theline = <MODULE>) 
+		       and not $theline =~ /\A=/) {
+		  if ($theline =~ /^((\S+)(,\s+\S+)*)\s*-\s*(.*)/) {
+		    push @addrefs, ($1 =~ /([\w:]+)/g);
+		    $skipNAME = 0;
+		  } elsif ($theline =~ /\S/) {
+		    $skipNAME = 0;
+		  }
+		}
+		# Prefer the name on the line over the file name:
+		if ($skipNAME and $used_name ne $firstline_name) {
+		  $used_name = $firstline_name;
+		}
+		@addref{@addrefs} = ($used_name) x @addrefs;
+		print STDERR "Adding `@addrefs' for `$used_name'.\n" if $debug;
+		$moddesc{$used_name} = $desc;
+		$skipNAMEs{$used_name}++ if $skipNAME;
 		#print STDERR "moddesc: `$_' `$oldname' `$3'\n";
 	      } else {
-		print STDERR "!!! $_: bad NAME: `$theline'\n";
+		print STDERR "\n!!! $_: bad NAME: `$theline'\n";
 	      }
 	    } elsif ($good) {
-	      print STDERR "!!! $_: no NAME\n";
+	      print STDERR "\n!!! $_: no NAME\n";
+	    }
+	    if ($good) {
+	      $seen{lc $used_name}++;
+	      $modnamehash{$used_name} = $longname;
+	      $addref{$used_name} = $used_name;
 	    }
 	}
 
@@ -920,6 +1645,7 @@ sub debug {
 sub echopod {
 
     $savenew = $_[0];
+    $oldpod ||= "";
 
 # if neither has a ::, same line
 
@@ -960,29 +1686,141 @@ sub echopod {
     print STDERR $_[0], " ";
 
 }
+
+sub hash_diff {
+  my ($old, $new) = @_;
+  my @keys = grep {not exists $old->{$_}} keys %$new;
+  my %diff;
+  @diff{@keys} = $new->{@keys};
+  %diff;
+}
+
+# Retval: hash: keys: toplevel nodes, values: '' or refs to lower-level-hashes.
+# Keys have :: prepended.
+sub create_tree {		
+  my $in = shift;
+  my %branch;
+  my (%ret, $leaf, $branch, $subbranch);
+  
+  # If $leaf is undef, it means ''. The rest has implicit :: prepended.
+  foreach $leaf (@$in) {
+    $ret{''} = '', next unless  defined $leaf;
+    if ($leaf =~ /::/) {
+      push @{$branch{$`}}, $';
+    } else {
+      push @{$branch{$leaf}}, undef; # Cooky to denote a leaf
+    }
+  }
+  if (exists $ret{''} or keys %branch > 1) { # Need this level!
+    foreach $branch (keys %branch) {
+      $subbranch = create_tree($branch{$branch});
+      if (keys %$subbranch > 1) {
+	$ret{"::$branch"} = $subbranch;
+      } else {
+	$ret{"::$branch" . (keys %$subbranch)[0]} = '';
+      }
+    }
+  } elsif (%branch) {		# This level is not needed, just copy sublevel.
+    my $key = (keys %branch)[0];
+    $subbranch = create_tree($branch{(keys %branch)[0]});
+    foreach $leaf (keys %$subbranch) {
+      $ret{"::$key$leaf"} = $subbranch->{$leaf};
+    }    
+  }  
+  \%ret;
+}
+
+sub format_args {
+  return "with no command-line arguments" unless @args;
+  out('with arguments C<"' . (join '"> C<"', @args) . '">', 1);
+}
+
 __END__
 
 =head1 NAME
 
-pod2inf - translator from POD format to IBM's F<.INF> format.
+pod2ipf - translator from POD format to IBM's F<.INF> format.
 
 =head1 SYNOPSYS
 
   cd \perllib\lib\pod
-  pod2inf > perl.ipf
+  pod2ipf > perl.ipf
   ipfc /inf perl.ipf
+
+  pod2ipf my.pod > my.ipf
+
+  pod2ipf --by-files "--title=My first book" \
+          chapter1.pod chapter2.pod > mybook.ipf
+
+  pod2ipf --by-dirs "--title=Book for /this/dir" /this/dir > book.ipf
+
+  pod2ipf --by-dirs "--title=Book with chapters" \
+          "--section-name=General topics" --dir=gen1 --dir=gen2 \
+          "--section-name=Specific topics" --dir=spe1
+          --dir=spe2 --dir spe3      >   longbook.ipf
 
 =head1 DESCRIPTION
 
-Currently takes no command-line options, and processes all the
+By default, if no command-line options: processes all the
 standard Perl pods in the current directory, as well as all the Perl
 libraries and all the Perl utilities it can find using F<Config.pm>,
 
-Both steps produce a lot of warnings, mostly because of malformed C<POD>s.
+The result should be converted to .INF via F<ipfc.exe>.
+
+Both steps produce a lot of warnings, mostly because of malformed
+C<POD>s. Some warnings (n306) from the current design, which intentionally
+generates empty pages.
+
+Recognized command-line switches (with defaults);
+
+  --(no)burst		Print Logo and About pages	(y)
+  --(no)about		Print About page		(y)
+  --(no)mods		Scan through @INC		(y)
+  --(no)std		Scan through standard Perl PODs	(y)
+  --(no)bin		Scan through $Config{bin}	(y)
+  --(no)tree		Output modules tree		(y)
+  --file		If present, do these files too (multiple OK)
+  --dir			Which addnl directories to scan (multiple OK)
+  --(no)dump-xref	Dump them to STDERR		(n)
+  --(no)dump-contents	Dump it to STDERR		(n)
+  --(no)dump-manpages	Dump unknown manpages to STDERR	(y)
+  --(no)debug		Print an additional debug info	(n)
+  --head-off		Offset of .IPF headings wrt POD	(2|0)
+  --to-bold		If present, words to make bold (multiple OK)
+  --to-code		If present, words to make code-like (multiple OK)
+  --section-name	Groups following --dir into a section (multiple OK)
+  --bin-dir		If present, search for binaries here too (multiple OK)
+  --by-files		Interpret extra args as file names (n if options seen)
+  --by-dirs		Interpret extra args as dir names (n)
+
+Depending on the value of C<head_off>, the toplevel sections of the generated book are formed basing on:
+
+=over 4
+
+=item 0
+
+C<=head1>-entries of the POD document(s);
+
+=item 1
+
+processed POD documents;
+
+=item 2
+
+processed groups of POD documents.
+
+=back 
+
+Options C<--by-files> and C<--by-dirs> reset the values to
+
+ --nodump-manpages --noburst --nobin --nomods --nostd --notree
+
+and interpret the unprocessed command-line parameters as names of
+files or directories to process.
 
 =head1 PREREQUISITES
 
-Developer toolkit is required (for C<ifpc>).
+Developer toolkit for OS/2 is required (for C<ifpc>).
 
 =head1 AUTHOR
 
@@ -991,7 +1829,7 @@ by Ilya Zakharevich C<ilya@math.ohio-state.edu>.
 
 =head1 SEE ALSO
 
-L<perlpod>, L<perl>, L<pod2man>, L<perldoc>.
+L<perlpod>, L<perl>, L<pod2man>, L<perldoc>, L<pod2html>, L<pod2latex>,  L<pod2texi>, L<pod2text>.
 
 =cut
 

@@ -1,7 +1,7 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
-eval 'exec perl -S $0 "$@"'
-    if 0;
+    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+	if $running_under_some_shell;
 
 =head1 NAME
 
@@ -16,6 +16,7 @@ B<pod2man>
 [ B<--date=>I<string> ]
 [ B<--fixed=>I<font> ]
 [ B<--official> ]
+[ B<--lax> ]
 I<inputfile>
 
 =head1 DESCRIPTION
@@ -74,6 +75,10 @@ miscellaneous information, and 8 for administrator commands.  This works
 best if you put your Perl man pages in a separate tree, like
 F</usr/local/perl/man/>.  By default, section 1 will be used
 unless the file ends in F<.pm> in which case section 3 will be selected.
+
+=item lax
+
+Don't complain when required sections aren't present.
 
 =back
 
@@ -167,7 +172,7 @@ Who wrote it (or AUTHORS if multiple).
 =item HISTORY
 
 Programs derived from other sources sometimes have this, or
-you might keep a modification long here.
+you might keep a modification log here.
 
 =back
 
@@ -217,7 +222,7 @@ not having a NAME is a fatal.
 =item Unknown escape: %s in %s
 
 (W) An unknown HTML entity (probably for an 8-bit character) was given via
-a C<E<lt>E<gt>> directive.  Besides amp, lt, gt, and quot, recognized
+a C<EE<lt>E<gt>> directive.  Besides amp, lt, gt, and quot, recognized
 entities are Aacute, aacute, Acirc, acirc, AElig, aelig, Agrave, agrave,
 Aring, aring, Atilde, atilde, Auml, auml, Ccedil, ccedil, Eacute, eacute,
 Ecirc, ecirc, Egrave, egrave, ETH, eth, Euml, euml, Iacute, iacute, Icirc,
@@ -242,7 +247,7 @@ C<=head1>, C<=head2>, C<=item>, C<=over>, C<=back>, or C<=cut>.
 
 If you would like to print out a lot of man page continuously, you
 probably want to set the C and D registers to set contiguous page
-numbering and even/odd paging, at least one some versions of man(7).
+numbering and even/odd paging, at least on some versions of man(7).
 Settting the F register will get you some additional experimental
 indexing:
 
@@ -299,6 +304,7 @@ $DEF_SECTION = 1;
 $DEF_CENTER = "User Contributed Perl Documentation";
 $STD_CENTER = "Perl Programmers Reference Guide";
 $DEF_FIXED = 'CW';
+$DEF_LAX = 0;
 
 sub usage {
     warn "$0: @_\n" if @_;
@@ -311,6 +317,7 @@ Options are:
 	--date=string         (default "$DEF_DATE")
 	--fixed=font	      (default "$DEF_FIXED")
 	--official	      (default NOT)
+	--lax                 (default NOT)
 EOF
 }
 
@@ -321,6 +328,7 @@ $uok = GetOptions( qw(
 	date=s
 	fixed=s
 	official
+	lax
 	help));
 
 $DEF_DATE = makedate((stat($ARGV[0]))[9] || time());
@@ -332,6 +340,7 @@ usage("Need one and only one podpage argument") unless @ARGV == 1;
 $section = $opt_section || ($ARGV[0] =~ /\.pm$/ ? 3 : $DEF_SECTION);
 $RP = $opt_release || $DEF_RELEASE;
 $center = $opt_center || ($opt_official ? $STD_CENTER : $DEF_CENTER);
+$lax = $opt_lax || $DEF_LAX;
 
 $CFont = $opt_fixed || $DEF_FIXED;
 
@@ -357,8 +366,12 @@ $wanna_see{SYNOPSIS}++ if $section =~ /^3/;
 
 $name = @ARGV ? $ARGV[0] : "<STDIN>";
 $Filename = $name;
-$name = uc($name) if $section =~ /^1/;
-$name =~ s/\.[^.]*$//;
+if ($section =~ /^1/) {
+    require File::Basename;
+    $name = uc File::Basename::basename($name);
+}
+$name =~ s/\.(pod|p[lm])$//i;
+$name =~ s(/)(::)g; # translate Getopt/Long to Getopt::Long, etc.
 
 if ($name ne 'something') {
     FCHECK: {
@@ -370,14 +383,15 @@ if ($name ne 'something') {
 		unless (/\s*-+\s+/) {
 		    $oops++;
 		    warn "$0: Improper man page - no dash in NAME header in paragraph $. of $ARGV[0]\n"
-		}
-		%namedesc = split /\s+-\s+/;
+                  } else {
+                    %namedesc = split /\s+-+\s+/;
+                  }
 		last FCHECK;
 	    }
 	    next if /^=cut\b/;	# DB_File and Net::Ping have =cut before NAME
-	    die "$0: Invalid man page - 1st pod line is not NAME in $ARGV[0]\n";
+	    die "$0: Invalid man page - 1st pod line is not NAME in $ARGV[0]\n" unless $lax;
 	}
-	die "$0: Invalid man page - no documentation in $ARGV[0]\n";
+	die "$0: Invalid man page - no documentation in $ARGV[0]\n" unless $lax;
     }
     close F;
 }
@@ -573,10 +587,21 @@ END
 
 $indent = 0;
 
+$begun = "";
+
 while (<>) {
     if ($cutting) {
 	next unless /^=/;
 	$cutting = 0;
+    }
+    if ($begun) {
+	if (/^=end\s+$begun/) {
+            $begun = "";
+	}
+	elsif ($begun =~ /^(roff|man)$/) {
+	    print STDOUT $_;
+        }
+	next;
     }
     chomp;
 
@@ -602,6 +627,22 @@ while (<>) {
 
     $verbatim = 0;
 
+    if (/^=for\s+(\S+)\s*/s) {
+	if ($1 eq "man" or $1 eq "roff") {
+	    print STDOUT $',"\n\n";
+	} else {
+	    # ignore unknown for
+	}
+	next;
+    }
+    elsif (/^=begin\s+(\S+)\s*/s) {
+	$begun = $1;
+	if ($1 eq "man" or $1 eq "roff") {
+	    print STDOUT $'."\n\n";
+	}
+	next;
+    }
+
     # check for things that'll hosed our noremap scheme; affects $_
     init_noremap();
 
@@ -623,18 +664,16 @@ while (<>) {
 	    )
 	} {I<$1>}gx;
 
-	# func(n) is a reference to a man page
+	# func(n) is a reference to a perl function or a man page
 	s{
-	    (\w+)
+	    ([:\w]+)
 	    (
-		\(
-		    [^\s,\051]+
-		\)
+		\( [^\051]+ \)
 	    )
 	} {I<$1>\\|$2}gx;
 
 	# convert simple variable references
-	s/(\s+)([\$\@%][\w:]+)/${1}C<$2>/g;
+	s/(\s+)([\$\@%][\w:]+)(?!\()/${1}C<$2>/g;
 
 	if (m{ (
 		    [\-\w]+
@@ -724,7 +763,7 @@ while (<>) {
 		    ?  "the section on I<$2> in the I<$1> manpage"
 		    :  "the section on I<$2>"
 	    }
-	}gex;
+	}gesx; # s in case it goes over multiple lines, so . matches \n
 
 	s/Z<>/\\&/g;
 
@@ -770,6 +809,11 @@ while (<>) {
 	}
 	elsif ($Cmd eq 'item') {
 	    s/^\*( |$)/\\(bu$1/g;
+	    # if you know how to get ":s please do
+	    s/\\\*\(L"([^"]+?)\\\*\(R"/'$1'/g;
+	    s/\\\*\(L"([^"]+?)""/'$1'/g;
+	    s/[^"]""([^"]+?)""[^"]/'$1'/g;
+	    # here do something about the $" in perlvar?
 	    print STDOUT qq{.Ip "$_" $indent\n};
 	    print qq{.IX Item "$_"\n};
 	}
@@ -796,7 +840,7 @@ print <<"END";
 .rn }` ''
 END
 
-if (%wanna_see) {
+if (%wanna_see && !$lax) {
     @missing = keys %wanna_see;
     warn "$0: $Filename is missing required section"
 	.  (@missing > 1 && "s")
@@ -880,13 +924,7 @@ sub escapes {
 # make troff just be normal, but make small nroff get quoted
 # decided to just put the quotes in the text; sigh;
 sub ccvt {
-     local($_,$prev) = @_;
-     if ( /^\W+$/ && !/^\$./ ) {
- 	($prev && "\n") . noremap(qq{.CQ $_ \n\\&});
- 	# what about $" ?
-     } else {
- 	noremap(qq{${CFont_embed}$_\\fR});
-     }
+    local($_,$prev) = @_;
     noremap(qq{.CQ "$_" \n\\&});
 }
 
@@ -973,7 +1011,7 @@ sub internal_lrefs {
     }
 
     $retstr .= " entr" . ( @items > 1  ? "ies" : "y" )
-	    .  " elsewhere in this document";
+	    .  " elsewhere in this document "; # terminal space to avoid words running together (pattern used strips terminal spaces)
 
     return $retstr;
 

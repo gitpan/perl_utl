@@ -1,9 +1,10 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
-    eval 'exec perl -S $0 "$@"'
-	if 0;
-    eval 'exec perl -S $0 "$@"'
-	if 0;
+    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+	if $running_under_some_shell;
+
+@pagers = ();
+push @pagers, "/usr/ucb/more" if -x "/usr/ucb/more";
 
 #
 # Perldoc revision #1 -- look up a piece of documentation in .pod format that
@@ -14,8 +15,10 @@ extproc perl -Sx
 # the perl manuals, though it too is written in perl.
 
 if(@ARGV<1) {
+        $0 =~ s,.*/,,;
 	die <<EOF;
-Usage: $0 [-h] [-v] [-t] [-u] [-m] PageName|ModuleName|ProgramName
+Usage: $0 [-h] [-v] [-t] [-u] [-m] [-l] PageName|ModuleName|ProgramName
+       $0 -f PerlFunc
 
 We suggest you use "perldoc perldoc" to get aquainted 
 with the system.
@@ -26,22 +29,33 @@ use Getopt::Std;
 $Is_VMS = $^O eq 'VMS';
 
 sub usage{
-        warn "@_\n" if @_;
+    warn "@_\n" if @_;
+    # Erase evidence of previous errors (if any), so exit status is simple.
+    $! = 0;
     die <<EOF;
-perldoc [-h] [-v] [-u] PageName|ModuleName|ProgramName...
+perldoc [options] PageName|ModuleName|ProgramName...
+perldoc [options] -f BuiltinFunction
+
+Options:
     -h   Display this help message.
     -t   Display pod using pod2text instead of pod2man and nroff.
     -u	 Display unformatted pod text
     -m   Display modules file in its entirety
+    -l   Display the modules file name
     -v	 Verbosely describe what's going on.
+
 PageName|ModuleName...
          is the name of a piece of documentation that you want to look at. You 
          may either give a descriptive name of the page (as in the case of
          `perlfunc') the name of a module, either like `Term::Info', 
          `Term/Info', the partial name of a module, like `info', or 
          `makemaker', or the name of a program, like `perldoc'.
+
+BuiltinFunction
+         is the name of a perl function.  Will extract documentation from
+         `perlfunc'.
          
-Any switches in the `PERLDOC' environment variable will be used before the 
+Any switches in the PERLDOC environment variable will be used before the 
 command line arguments.
 
 EOF
@@ -52,15 +66,21 @@ use Text::ParseWords;
 
 unshift(@ARGV,shellwords($ENV{"PERLDOC"}));
 
-getopts("mhtuv") || usage;
+getopts("mhtluvf:") || usage;
 
 usage if $opt_h || $opt_h; # avoid -w warning
 
-usage("only one of -t, -u, or -m") if $opt_t + $opt_u + $opt_m > 1;
+usage("only one of -t, -u, -m or -l") if $opt_t + $opt_u + $opt_m + $opt_l > 1;
 
 if ($opt_t) { require Pod::Text; import Pod::Text; }
 
-@pages = @ARGV;
+if ($opt_f) {
+   @pages = ("perlfunc");
+} else {
+   @pages = @ARGV;
+}
+
+
 
 sub containspod {
 	my($file) = @_;
@@ -80,11 +100,10 @@ sub containspod {
      my($file) = @_;
      local *DIR;
      local($")="/";
-print "$file\n";
      my(@p,$p,$cip);
      foreach $p (split(/\//, $file)){
 	if (($Is_VMS or $^O eq 'os2') and not scalar @p) {
-	    # VMS and OS/2 filesystems don't begin at '/'
+	    # VMSish filesystems don't begin at '/'
 	    push(@p,$p);
 	    next;
 	}
@@ -116,6 +135,7 @@ print "$file\n";
   	my($recurse,$s,@dirs) = @_;
   	$s =~ s!::!/!g;
   	$s = VMS::Filespec::unixify($s) if $Is_VMS;
+	return $s if -f $s && containspod($s);
   	printf STDERR "looking for $s in @dirs\n" if $opt_v;
  	my $ret;
  	my $i;
@@ -184,27 +204,65 @@ if(!@found) {
 	exit ($Is_VMS ? 98962 : 1);
 }
 
-if( ! -t STDOUT ) { $opt_f = 1 }
+if ($opt_l) {
+    print join("\n", @found), "\n";
+    exit;
+}
+
+if( ! -t STDOUT ) { $no_tty = 1 }
 
 unless($Is_VMS) {
 	$tmp = "/tmp/perldoc1.$$";
-	$goodresult = 0;
-	@pagers = qw( more less pg view cat );
-	unshift(@pagers,$ENV{PAGER}) if $ENV{PAGER};
+	push @pagers, qw( more less pg view cat );
+	unshift @pagers, $ENV{PAGER}  if $ENV{PAGER};
 } else {
 	$tmp = 'Sys$Scratch:perldoc.tmp1_'.$$;
-	@pagers = qw( most more less type/page );
-	unshift(@pagers,$ENV{PERLDOC_PAGER}) if $ENV{PERLDOC_PAGER};
-	$goodresult = 1;
+	push @pagers, qw( most more less type/page );
 }
+unshift @pagers, $ENV{PERLDOC_PAGER} if $ENV{PERLDOC_PAGER};
 
 if ($opt_m) {
-    foreach $pager (@pagers) {
-	my($sts) = system("$pager @found");
-	exit 0 if ($Is_VMS ? ($sts & 1) : !$sts);
-    }
-    exit $Is_VMS ? $sts : 1;
+	foreach $pager (@pagers) {
+		system("$pager @found") or exit;
+	}
+	if ($Is_VMS) { eval 'use vmsish qw(status exit); exit $?' }
+	exit 1;
 } 
+
+if ($opt_f) {
+   my $perlfunc = shift @found;
+   open(PFUNC, $perlfunc) or die "Can't open $perlfunc: $!";
+
+   # Skip introduction
+   while (<PFUNC>) {
+       last if /^=head2 Alphabetical Listing of Perl Functions/;
+   }
+
+   # Look for our function
+   my $found = 0;
+   while (<PFUNC>) {
+       if (/^=item\s+\Q$opt_f\E\b/o)  {
+	   $found++;
+       } elsif (/^=item/) {
+	   last if $found;
+       }
+       push(@pod, $_) if $found;
+   }
+   if (@pod) {
+       if ($opt_t) {
+	   open(FORMATTER, "| pod2text") || die "Can't start filter";
+	   print FORMATTER "=over 8\n\n";
+	   print FORMATTER @pod;
+	   print FORMATTER "=back\n";
+	   close(FORMATTER);
+       } else {
+	   print @pod;
+       }
+   } else {
+       die "No documentation for perl function `$func' found\n";
+   }
+   exit;
+}
 
 foreach (@found) {
 
@@ -213,12 +271,14 @@ foreach (@found) {
 		Pod::Text::pod2text($_,*TMP);
 		close(TMP);
 	} elsif(not $opt_u) {
-		open(TMP,">>$tmp");
-		$rslt = `pod2man $_ | nroff -man`;
-		if ($Is_VMS) { $err = !($? % 2) || $rslt =~ /IVVERB/; }
-		else      { $err = $?; }
-		print TMP $rslt unless $err;
-		close TMP;
+		my $cmd = "pod2man --lax $_ | nroff -man";
+		$cmd .= " | col -x" if $^O =~ /hpux/;
+		$rslt = `$cmd`;
+		unless(($err = $?)) {
+			open(TMP,">>$tmp");
+			print TMP $rslt;
+			close TMP;
+		}
 	}
 	                                                
 	if( $opt_u or $err or -z $tmp) {
@@ -235,15 +295,13 @@ foreach (@found) {
 	}
 }
 
-if( $opt_f ) {
+if( $no_tty ) {
 	open(TMP,"<$tmp");
 	print while <TMP>;
 	close(TMP);
 } else {
 	foreach $pager (@pagers) {
-		$sts = system("$pager $tmp");
-		last if $Is_VMS && ($sts & 1);
-		last unless $sts;
+		system("$pager $tmp") or last;
 	}
 }
 
@@ -259,14 +317,17 @@ perldoc - Look up Perl documentation in pod format.
 
 =head1 SYNOPSIS
 
-B<perldoc> [B<-h>] [B<-v>] [B<-t>] [B<-u>] PageName|ModuleName|ProgramName
+B<perldoc> [B<-h>] [B<-v>] [B<-t>] [B<-u>] [B<-m>] [B<-l>] PageName|ModuleName|ProgramName
+
+B<perldoc> B<-f> BuiltinFunction
 
 =head1 DESCRIPTION
 
-I<perldoc> looks up a piece of documentation in .pod format that is
-embedded in the perl installation tree or in a perl script, and displays
-it via pod2man | nroff -man | $PAGER.  This is primarily used for the
-documentation for the perl library modules. 
+I<perldoc> looks up a piece of documentation in .pod format that is embedded
+in the perl installation tree or in a perl script, and displays it via
+C<pod2man | nroff -man | $PAGER>. (In addition, if running under HP-UX,
+C<col -x> will be used.) This is primarily used for the documentation for
+the perl library modules.
 
 Your system may also have man pages installed for those modules, in
 which case you can probably just use the man(1) command.
@@ -299,6 +360,15 @@ This may be useful if the docs don't explain a function in the detail
 you need, and you'd like to inspect the code directly; perldoc will find
 the file for you and simply hand it off for display.
 
+=item B<-l> file name only
+
+Display the file name of the module found.
+
+=item B<-f> perlfunc
+
+The B<-f> option followed by the name of a perl built in function will
+extract the documentation of this function from L<perlfunc>.
+
 =item B<PageName|ModuleName|ProgramName>
 
 The item you want to look up.  Nested modules (such as C<File::Basename>)
@@ -324,10 +394,6 @@ C<perldoc> itself, are available.)
 Kenneth Albanowski <kjahds@kjahds.com>
 
 Minor updates by Andy Dougherty <doughera@lafcol.lafayette.edu>
-
-=head1 SEE ALSO
-
-=head1 DIAGNOSTICS
 
 =cut
 

@@ -1,14 +1,10 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
-    eval 'exec perl -S $0 "$@"'
-	if 0;
+    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+	if $running_under_some_shell;
 
-'di ';
-'ds 00 "';
-'ig 00 ';
-
-$perlincl = "";
-
+use Config;
+$perlincl = @Config{installsitearch};
 
 chdir '/usr/include' || die "Can't cd /usr/include";
 
@@ -26,6 +22,10 @@ $inif = 0;
 @ARGV = ('-') unless @ARGV;
 
 foreach $file (@ARGV) {
+    # Recover from header files with unbalanced cpp directives
+    $t = '';
+    $tab = 0;
+
     if ($file eq '-') {
 	open(IN, "-");
 	open(OUT, ">-");
@@ -74,7 +74,7 @@ foreach $file (@ARGV) {
 			$args = "local($args) = \@_;\n$t    ";
 		    }
 		    s/^\s+//;
-		    do expr();
+		    expr();
 		    $new =~ s/(["\\])/\\$1/g;
 		    if ($t ne '') {
 			$new =~ s/(['\\])/\\$1/g;
@@ -88,7 +88,7 @@ foreach $file (@ARGV) {
 		}
 		else {
 		    s/^\s+//;
-		    do expr();
+		    expr();
 		    $new = 1 if $new eq '';
 		    if ($t ne '') {
 			$new =~ s/(['\\])/\\$1/g;
@@ -116,7 +116,7 @@ foreach $file (@ARGV) {
 	    elsif (s/^if\s+//) {
 		$new = '';
 		$inif = 1;
-		do expr();
+		expr();
 		$inif = 0;
 		print OUT $t,"if ($new) {\n";
 		$tab += 4;
@@ -125,7 +125,7 @@ foreach $file (@ARGV) {
 	    elsif (s/^elif\s+//) {
 		$new = '';
 		$inif = 1;
-		do expr();
+		expr();
 		$inif = 0;
 		$tab -= 4;
 		$t = "\t" x ($tab / 8) . ' ' x ($tab % 8);
@@ -165,10 +165,31 @@ sub expr {
 	    }
 	    next;
 	};
-	s/^sizeof\s*\(([^)]+)\)/{$1}/ && do {
-	    $new .= '$sizeof';
-	    next;
-	};
+        # replace "sizeof(foo)" with "{foo}"
+        # also, remove * (C dereference operator) to avoid perl syntax
+        # problems.  Where the %sizeof array comes from is anyone's
+        # guess (c2ph?), but this at least avoids fatal syntax errors.
+        # Behavior is undefined if sizeof() delimiters are unbalanced.
+        # This code was modified to able to handle constructs like this:
+        #   sizeof(*(p)), which appear in the HP-UX 10.01 header files.
+        s/^sizeof\s*\(// && do {
+            $new .= '$sizeof';
+            my $lvl = 1;  # already saw one open paren
+            # tack { on the front, and skip it in the loop
+            $_ = "{" . "$_";
+            my $index = 1;
+            # find balanced closing paren
+            while ($index <= length($_) && $lvl > 0) {
+                $lvl++ if substr($_, $index, 1) eq "(";
+                $lvl-- if substr($_, $index, 1) eq ")";
+                $index++;
+            }
+            # tack } on the end, replacing )
+            substr($_, $index - 1, 1) = "}";
+            # remove pesky * operators within the sizeof argument
+            substr($_, 0, $index - 1) =~ s/\*//g;
+            next;
+        };
 	s/^([_a-zA-Z]\w*)//	&& do {
 	    $id = $1;
 	    if ($id eq 'struct') {
@@ -176,7 +197,7 @@ sub expr {
 		$id .= ' ' . $1;
 		$isatype{$id} = 1;
 	    }
-	    elsif ($id eq 'unsigned') {
+	    elsif ($id eq 'unsigned' || $id eq 'long') {
 		s/^\s+(\w+)//;
 		$id .= ' ' . $1;
 		$isatype{$id} = 1;
@@ -220,53 +241,60 @@ sub expr {
     }
 }
 ##############################################################################
+__END__
 
-	# These next few lines are legal in both Perl and nroff.
+=head1 NAME
 
-.00 ;			# finish .ig
+h2ph - convert .h C header files to .ph Perl header files
 
-'di			\" finish diversion--previous line must be blank
-.nr nl 0-1		\" fake up transition to first page again
-.nr % 0			\" start at page 1
-'; __END__ ############# From here on it's a standard manual page ############
-.TH H2PH 1 "August 8, 1990"
-.AT 3
-.SH NAME
-h2ph \- convert .h C header files to .ph Perl header files
-.SH SYNOPSIS
-.B h2ph [headerfiles]
-.SH DESCRIPTION
-.I h2ph
+=head1 SYNOPSIS
+
+B<h2ph [headerfiles]>
+
+=head1 DESCRIPTION
+
+I<h2ph>
 converts any C header files specified to the corresponding Perl header file
 format.
 It is most easily run while in /usr/include:
-.nf
 
 	cd /usr/include; h2ph * sys/*
 
-.fi
 If run with no arguments, filters standard input to standard output.
-.SH ENVIRONMENT
+
+=head1 ENVIRONMENT
+
 No environment variables are used.
-.SH FILES
-/usr/include/*.h
-.br
-/usr/include/sys/*.h
-.br
+
+=head1 FILES
+
+ /usr/include/*.h
+ /usr/include/sys/*.h
+
 etc.
-.SH AUTHOR
+
+=head1 AUTHOR
+
 Larry Wall
-.SH "SEE ALSO"
+
+=head1 SEE ALSO
+
 perl(1)
-.SH DIAGNOSTICS
+
+=head1 DIAGNOSTICS
+
 The usual warnings if it can't read or write the files involved.
-.SH BUGS
+
+=head1 BUGS
+
 Doesn't construct the %sizeof array for you.
-.PP
+
 It doesn't handle all C constructs, but it does attempt to isolate
 definitions inside evals so that you can get at the definitions
 that it can translate.
-.PP
+
 It's only intended as a rough tool.
 You may need to dicker with the files produced.
-.ex
+
+=cut
+

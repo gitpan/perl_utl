@@ -1,8 +1,9 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
-    eval 'exec perl -S $0 "$@"'
-	if 0;
+    eval 'exec f:/perllib/bin/perl -S $0 ${1+"$@"}'
+	if $running_under_some_shell;
 $startperl = "#!f:/perllib/bin/perl";
+$perlpath = "f:/perllib/bin/perl";
 # 
 # Modified September 26, 1993 to provide proper handling of years after 1999
 #   Tom Link <tml+@pitt.edu>
@@ -210,8 +211,7 @@ while (@ARGV) {
 
 print <<"END";
 $startperl
-
-eval 'exec perl -S \$0 \${1+"\$@"}'
+    eval 'exec $perlpath -S \$0 \${1+"\$@"}'
 	if \$running_under_some_shell;
 
 END

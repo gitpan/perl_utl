@@ -1,11 +1,11 @@
-extproc perl -Sx 
+extproc perl -S 
 #!f:/perllib/bin/perl
     eval 'exec perl -S $0 "$@"'
 	if 0;
 
-require 5.002;
+require 5.003;
 
-my $VERSION = 19960302;
+my $VERSION = 19960930;
 
 =head1 NAME
 
