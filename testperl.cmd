@@ -8,9 +8,9 @@ rem      testperl perl_
 set tperl=%1
 if "%tperl%" == "" set tperl=perl
 
-echo ====================================
+echo .====================================
 echo Testing %tperl%...  Getting version...
-echo ====================================
+echo .====================================
 rem Errorlevel is not set if the program is not found?!
 %tperl% -e "exit 1"
 if errorlevel 1 goto mayhave
@@ -26,6 +26,8 @@ echo Cannot start %tperl% !!!  Please check that you have %tperl% on PATH,
 echo and (if you do not use perl_.exe) that perl.dll is on LIBPATH.
 echo ... Keep in mind that changes to config.sys DO NOT take effect
 echo until reboot, and LIBPATH can be changed ONLY from config.sys.
+
+rem This works with 4os2...
 input "Press <ENTER>" %%i
 exit 1
 
@@ -148,6 +150,7 @@ EOP
     (substr $prefix, 0, (length $part[0])) = $part[1] 
       if substr $prefix, 0, (length $part[0]) eq $part[0];
   }
+  $prefix =~ s|\\|/|g;
   $prefix =~ s|/$||;
   @f_keys = grep { $Config{$_} =~ /^(?!\Q$prefix\E\b\S*$)[a-z]:/i
 		     and not /^(emxpath|libemx)$/} keys %Config;

@@ -1,9 +1,10 @@
 extproc perl -S
 #!f:/perllib/bin/perl -w
-    eval 'exec perl -S $0 "$@"'
-	if 0;
 
-# $Id: lwp-download.PL,v 1.4 1997/09/26 12:11:13 aas Exp $
+eval 'exec f:/perllib/bin/perl -w -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+# $Id: lwp-download.PL,v 1.7 1998/08/04 09:03:35 aas Exp $
 
 =head1 NAME
 
@@ -23,10 +24,11 @@ specified as the second command line argument.
 The I<lwp-download> program is implemented using the I<libwww-perl>
 library.  It is better suited to down load big files than the
 I<lwp-request> program because it does not store the file in memory.
-Another benefit is that it will keep you updated about it's progress
-and that you don't have any options to worry about.
+Another benefit is that it will keep you updated about its progress
+and that you don't have much options to worry about.
 
-Use the C<-a> option to save the file in text (ascii) mode.
+Use the C<-a> option to save the file in text (ascii) mode.  Might make a
+difference on dosish systems.
 
 =head1 EXAMPLE
 
@@ -65,6 +67,7 @@ my $argfile = shift;
 my $ua = new LWP::UserAgent;
 
 $ua->agent("lwp-download/0.1 " . $ua->agent);
+$ua->env_proxy;
 
 my $req = new HTTP::Request GET => $url;
 
@@ -75,7 +78,7 @@ my $size = 0;  # number of bytes received
 my $start_t;   # start time of download
 my $last_dur;  # time of last callback
 
-my $shown = 0; # has we called the show() function yet
+my $shown = 0; # have we called the show() function yet
 
 $SIG{INT} = sub { die "Interrupted\n"; };
 

@@ -7,7 +7,8 @@ use Cwd;
 use Config '%Config';
 use Getopt::Long 'GetOptions';
 use vars qw{%do_file_hash %do_dirs_hash %bin_hash %faqs_hash %pragmas_hash
-	    %mods_hash %pod_hash %add_mods_hash @add_dirs %tree_hash};
+	    %mods_hash %pod_hash %add_mods_hash @add_dir @add_files %tree_hash
+            $inlink};
 # use Fatal qw(open close); # would not work: interprets filehandles as barewords.
 sub intern_modnamehash;
 sub do_libdir;
@@ -97,6 +98,23 @@ $VERSION = "1.11";
 # 1.9:  Better handling of 'Go up' (last item was going to the following
 #	section).
 
+# 1.10: Misprint...
+#	Supports L<foo|bar>
+#	Do not index/create refs for perltoc.
+#	Numeration of panes fixed to be not off-by-one.  (Minor bugs may be created for writing TOC sections and "Go up" links.)
+
+# 1.11: Remove (last piece?) of voodoo - in contents() - it did not work anyway
+#	Allow links to text containing L<> inside.
+
+# 1.12: Allow for --section-name with --file too;
+#	Wrap arguments in "About";
+#	--believe-pod-name implemented.
+#	--alias implemented.
+
+# 1.13: One more piece of voodoo for backrefs removed.
+
+# 1.14: @add_dir was misspelled
+
 $font = ''; #':font facename=Helv size=16x8.';
 
 $debug = 0;
@@ -104,7 +122,6 @@ $debug_xref = 0;
 $dump_xref = 0;
 $dump_contents = 0;
 $dump_manpages = 1;
-$ref_delta = 1;     # start from 1
 $maxtoc = 5;
 $dots = 0;
 $multi_win = 1;     # 1 = use alternate window for toc
@@ -120,7 +137,8 @@ $head_off = 2;
 $do_tree = 1;
 $do_faqs = 1;
 $by_files = $by_dirs = 0;
-@add_dirs = ();
+@add_dir = ();
+@add_files = ();
 my @args = @ARGV;
 my $foundrefs = 0;
 my %i1ids;
@@ -158,11 +176,23 @@ sub add_dir {			# If without args, just finish processing
   my $name = $_[1];
   print STDERR "Starting section `$name'.\n" if @_ and $debug;
   if (@do_dirs) {
-    @add_dir = ($cat_descr{do_dirs},[]) unless @add_dir;
-    push @{$add_dir[-1]}, @do_dirs;
+    @add_dir = ($cat_descr{do_dirs},[],[]) unless @add_dir;
+    push @{$add_dir[-2]}, @do_dirs;
     @do_dirs = ();
   }
-  push @add_dir, $name, [] if @_;
+  if (@do_file) {
+    @add_dir = ($cat_descr{do_dirs},[],[]) unless @add_dir;
+    push @{$add_dir[-1]}, @do_file;
+    @do_file = ();
+  }
+  push @add_dir, $name, [], [] if @_;
+  push @add_files, $name, [], [] if @_;
+}
+
+sub do_alias {
+  my $alias = $_[1];
+  warn("Ignoring alias $alias: no file name found"), return unless @do_file;
+  $alias{$do_file[-1]} = $alias;
 }
 
 if (@ARGV >= 1 and $ARGV[0] !~ /^-/) {
@@ -192,7 +222,9 @@ GetOptions(
 	   "by-dirs" => \&by_dirs,
 	   "www" => \$www,	# Browser
 	   "section-name=s" => \&add_dir,
+	   "alias=s" => \&do_alias,
 	   "bin-dir=s@" => \@bin_dirs, # If present, search for bins here too
+	   "believe-pod-name!" => \$believe_pod_name, # Believe NAME section
 	  );
 if ($by_dirs) {
   push @do_dirs, @ARGV;
@@ -240,13 +272,21 @@ if (@do_file) {
 %old_hash = %modnamehash;
 {
   no strict 'refs';
-  foreach (1 .. @add_dir/2) {
-    foreach $libdir (@{$add_dir[2*$_-1]}) {
+  foreach (1 .. @add_dir/3) {
+    foreach $libdir (@{$add_dir[3*$_-2]}) {
       do_libdir $libdir;
     }
-    print STDERR "Doing section `$_' named `$add_dir[2*$_-2]': `@{$add_dir[2*$_-1]}'.\n" if $debug;
+    foreach $file (@{$add_dir[3*$_-1]}) {
+      # Fake File::Find
+      #print STDERR "Doing section `$add_dir[3*$_-3]': file `$file'.\n" if $debug;
+      local $_;
+      $File::Find::name = $_ = $file;
+      $libdir = ".";
+      intern_modnamehash();
+    }
+    print STDERR "Doing section `$_' named `$add_dir[3*$_-3]': dirs `@{$add_dir[3*$_-2]}', files `@{$add_dir[3*$_-1]}'.\n" if $debug;
     %{"do_dirs$ {_}_hash"} = hash_diff(\%old_hash, \%modnamehash);
-    $cat_descr{"do_dirs$_"} = $add_dir[2*$_-2];
+    $cat_descr{"do_dirs$_"} = $add_dir[3*$_-3];
     %old_hash = %modnamehash;
   }
 }
@@ -287,8 +327,8 @@ if ($do_std and -f 'perl.pod') {
   }
   while (<MPOD>) {
     last if /^\S/;
-    push @files, [$1, $2] if /^\s+(\S*)\s+(.*)/ and $1 !~ /^perlfaq/; 
-				# and $1 ne 'perltoc';
+    push @files, [$1, $2] 
+      if /^\s+(\S*)\s+(.*)/ and $1 ne 'perltoc' and $1 !~ /^perlfaq/;
   }
   close MPOD;
   open MPOD, 'perltoc.pod';
@@ -297,7 +337,7 @@ if ($do_std and -f 'perl.pod') {
   }
   while (<MPOD>) {
     last if /^=head1/;
-    push @pragmas, $1 if /^=head2\s+(\S*)\s+-\s/; 
+    push @pragmas, $1 if /^=head2\s+(?:L<)?(\S*?)>?\s+-\s/; 
   }
   close MPOD;
   foreach $key (@pragmas) {
@@ -363,7 +403,7 @@ foreach $module (keys %skipNAMEs) {
 #}
 
 my @std_categories = (qw(pod pragmas mods add_mods bin faqs do_dirs),
-		      (map "do_dirs$_", 1 .. @add_dir/2),
+		      (map "do_dirs$_", 1 .. @add_dir/3),
 		      qw(do_file tree));
 print STDERR "Categories: `@std_categories'.\n" if $debug;
 
@@ -450,7 +490,7 @@ $section_head[1] = '';		# To simplify warnings
 sub out;
 sub contents;
 sub escape;
-sub addref;
+sub add_ref;
 sub findref;
 sub winhead;
 sub winlink;
@@ -567,7 +607,9 @@ EOP
       my @titles;
       for $cat (@std_categories) {
 	next unless $categories{$cat};
+	insert_back($headno) if $pass == 2;;
 	category_emit($cat) if $pass == 2;
+	$no_in_category = 0;
 	@titles = sort {lc $a cmp lc $b or $a cmp $b} 
 		keys %{$categories{$cat}};
 	@titles = @pods if $cat eq 'pod'; # Preserve the sorting order
@@ -629,10 +671,11 @@ sub process_index {
 
 sub output_file {
         my $ftitle = shift;
+#warn "<<<doing file for `$ftitle'\n";
         my $fcomment = $moddesc{$ftitle} || "Perl module $ftitle";
 	
         $fname = $ftitle . '.pod';
-	if (not -f $fname) {
+	if (not -f "./$fname") {	# Protect 'B::C.pod' from accessing B drive
 	  $fname = $modnamehash{$ftitle};
 	}
         $page = $ftitle;
@@ -644,19 +687,21 @@ sub output_file {
         print STDERR "\n" if !$dots;
 
         $section = $ftitle . ' - ' . $fcomment;
-        if ($pass == 1) {
-            addsection($section, $headno, 1);
-            addref($page, $headno);
-	    $is_head{$ftitle}++;
-        }
         $section_head[1] = $page;
         $path = $section_head[1];
+        $headno++;
+#warn "<<<incremented headno to $headno, page='$page', washead='$heading' out='$section'\n";
+        if ($pass == 1) {
+            addsection($section, $headno, 1);
+            add_ref($page, $headno);
+	    $is_head{$ftitle}++;
+        }
         if ($pass == 2) {
 	    insert_nl;
 	    my $hlevel = $head_off >= 1 ? $head_off : 1;
-	    insert_back($hlevel,$headno - 1);
+	    insert_back($headno - 1) if $no_in_category++;
             print ":h$hlevel toc=$toc " . winhead($headno)
-                . " id=" . ($headno + $ref_delta) . "."
+                . " id=$headno."
                 . out($section, 0) . "\n" . $font; # Headers take no fonts.
             output_index($section, $ftitle);
             output_index($ftitle, $ftitle);
@@ -668,7 +713,6 @@ sub output_file {
 	    count_index($section);
 	    count_index($ftitle);
 	}
-        $headno++;
         
         @lstack = ();
         $emptypane = $emptysection = 1;
@@ -685,6 +729,7 @@ sub output_file {
 		  $heading =~ s/\s*$//;	# localize $1
 		  $heading = untabify $heading;
 		}
+#warn "<<<set head='$heading'\n";
 		
 		if (@lstack) {
 		  warn "List not finished (@lstack) in (@section_head[1..$hl]).\n"
@@ -707,7 +752,6 @@ sub output_file {
 		  }	
 		}
 
-		$old_hl = $hl;
                 $hl = $1 + 1;
                 $section_head[$hl] = $heading;
                 $path = join('/', @section_head[1..$hl]);
@@ -716,25 +760,26 @@ sub output_file {
 		  $inpod = 0;
 		  next PARA;
 		}
-                contents($hl, $headno) if $emptypane;
-		insert_back($old_hl,$headno); # Previous header
+                contents($headno) if $emptypane;
+		insert_back($headno); # Previous header
+                $headno++;
+#warn "<<<incremented headno to $headno, page='$page', head='$heading'\n";
                 if ($pass == 1) {
                     addsection($heading, $headno, $hl);
 		    # XXXX Is wrong with some escapes:
 		    #1 while $heading =~ s/[A-Z]<.*?>/$1/g;
-                    addref(qq|$page/"$heading"|, $headno);
+                    add_ref(qq|$page/"$heading"|, $headno);
 		    $is_head{$heading}++;
                 }
                 if ($pass == 2) {
 		    insert_nl;
                     print ":h", $hl + $head_off - 1 , " " . winhead($headno)
-                        . " id=" . ($headno + $ref_delta) . "."
+                        . " id=$headno."
                         . out($heading, 0) . "\n" . $font; # Headers take no fonts
 		    output_index($heading, $path);		    
 		} else {
 		    count_index($heading);
 		}
-                $headno++;
                 print STDERR "." if $dots;
                 $emptypane = $emptysection = 1;
 	      } elsif ($line =~ /^=over\b\s*/) {
@@ -750,7 +795,7 @@ sub output_file {
 		}
                 chomp($line = <IN>);
 		if ($pass == 1) {
-		  $auto_link_hard{$1}++ while /X<([^<>]+)+>/g;
+		  $auto_link_hard{$1}++ while $line =~ /X<([^<>]+)+>/g;
 		}
                 if ($line =~ /^\=item(\s*$|\s+\*)/) { # item * (or empty)
                     push(@lstack, "ul");
@@ -808,6 +853,8 @@ sub output_file {
                 $heading = $';
 		$heading =~ s/\s+$//;
 		$heading = untabify($heading);
+		$heading =~ s/^\*\s*//;	# Too late to process \* anyway
+#warn "<<<set head='$heading'\n";
                 $headx = $heading;
 		$headx =~ s/E<(.*?)>/$HTML_Escapes{$1}/ge; # Primitive: $<digit>
 		1 while $headx =~ s/[A-Z]<(.*?)>/$1/g; # Primitive: $<digit>
@@ -821,8 +868,8 @@ sub output_file {
 		}
                 if ($lstack[$#lstack] eq 'head'
 		    or $lstack[$#lstack] eq 'finehead') {
-                    contents($hl, $headno) if $emptypane;
-		    insert_back($hl,$headno) unless $emptysection; # Previous header
+                    contents($headno - 1) if $emptypane;
+		    insert_back($headno - 1) unless $emptysection; # Previous header
 
                     # lowest level never empty, IPFC uses next page
                     # by default (but Back button doesn't work :-()
@@ -836,18 +883,20 @@ sub output_file {
 		    $word1 = $1;
 		    $headx =~ /(\S+)/;
 		    $word2 = $1;
-                    if ($pass == 1) {
-                        addsection($heading, $headno, $hl);
-                        addref(qq|$page/"$headx"|, $headno);
-                        addref(qq|$page/"$word1"|, $headno) if defined $word1;
-                        addref(qq|$page/"$word2"|, $headno) if defined $word2;
-                    }
                     $section_head[$hl] = $heading;
                     $path = join('/', @section_head[1..$hl]);
 		    $sh_path = join('/', @section_head[1..$hl-1]);
 		    insert_nl if $pass == 2;
+                    $headno++;
+#warn "<<<incremented headno to $headno, page='$page', head='$heading'\n";
+                    if ($pass == 1) {
+                        addsection($heading, $headno, $hl);
+                        add_ref(qq|$page/"$headx"|, $headno);
+                        add_ref(qq|$page/"$word1"|, $headno) if defined $word1;
+                        add_ref(qq|$page/"$word2"|, $headno) if defined $word2;
+                    }
 		    print ":h", $hl + $head_off - 1, " " . winhead($headno)
-		      . " id=" . ($headno + $ref_delta) . "."
+		      . " id=$headno."
 			. out($heading, 0) . "\n" . $font 
 			  if $pass == 2; # Headers take no fonts
 		    output_index($heading, $path);		    
@@ -861,7 +910,6 @@ sub output_file {
 			  and $word2 ne $word1;
 		    }
 		    $is_head{$heading}++ if $pass == 1; # XXXX Need to strip?
-                    $headno++;
 
                     # look ahead to see if this =item is empty.
                     # if it is, create a list of empty pages of
@@ -889,12 +937,13 @@ sub output_file {
                 } else {	# Different list's items
 		    local $in_item_header = 1;
                     $emptypane = $emptysection = 0;
-		    addref(qq|$page/"$headx"|, $headno, 1);
+		    add_ref(qq|$page/"$headx"|, $headno, 1);
                     if ($lstack[$#lstack] eq 'ul' && $heading =~ /^\s*\*\s*(.*)$/ or
                         $lstack[$#lstack] eq 'ol' && $heading =~ /^\s*\d+\.?\s*(.*)$/)
 		      {		# Bulleted or numbered item matching list type.
                             print ":li." if $pass == 2;
                             $heading = $1;
+#warn "<<<set head='$heading'\n";
                             if ($1 ne "") {
                                 print out($heading, 1) . "\n" if $pass == 2;
 				output_index($heading, $path)
@@ -909,6 +958,7 @@ sub output_file {
 			$heading =~ s/^\s*\*?\s+//;
 			$heading =~ s/\s+$//;
 			$heading = '*' if $heading eq '';
+#warn "<<<set head='$heading'\n";
 			print out($heading, 1) . "\n" if $pass == 2;
 			output_index($heading, $path)
 			  unless $is_head{$heading} or $heading eq '*' or $heading eq '';
@@ -1038,6 +1088,7 @@ sub untabify_after {		# Some markup is already there.
 sub output_index {
   return &count_index if $pass == 1;
   my ($heading, $path) = (shift, shift);
+  return if $path =~ m,^perltoc/,;
   $heading = substr($heading, 0, 110) . "..." if length $heading > 124;
   $path = substr($path, 0, 110) . "..." if length $path > 124;
   if ($index_seen{$heading} > 1) {
@@ -1057,7 +1108,7 @@ sub count_index { $index_seen{shift()}++ }
 
 sub maybe_link {
   my $txt = shift;
-  exists $links{findref($txt)} ? "L<$txt>" : $txt;
+  exists $links{findref($txt,1)} ? "L<$txt>" : $txt;
 }
 
 sub strip {
@@ -1070,30 +1121,32 @@ sub strip {
 }
 
 sub try_external_link {
-    my $txt = shift;
+    my ($txt, $outtxt) = shift;
+    $outtxt = $txt unless defined $outtxt;
+    
     $foundrefs++, return ":link reftype=hd refid=$x_index{$txt}."
-      . out($txt) . ":elink."
+      . out($outtxt) . ":elink."
 	if exists $x_index{$txt};
     
-    print STDERR "trying `$txt'" if $debug;
+    #print STDERR "trying `$txt'" if $debug;
     
     if ($txt =~ m,^(http|file|ftp|mailto|news|newsrc|gopher)://,) {
 	my $link = strip($txt);
 	return 
 	  ":link reftype=launch object='$www' data='$link'."
-	    . out($txt) . ":elink.";
+	    . out($outtxt) . ":elink.";
 
     } elsif ($txt =~ m,^\"(http|file|ftp|mailto|news|newsrc|gopher)://, 
 	     and $txt =~ /\"$/) {
 	my $link = strip(substr $txt, 1, length($txt) - 2);
 	return 
 	  ":link reftype=launch object='$www' data='$link'."
-	    . out($txt) . ":elink.";
+	    . out($outtxt) . ":elink.";
 
     } elsif ($txt =~ m,^(\w+)\([23]\)|POSIX\s*\(3\)/(\w+)|(emx\w+)$,i) {
 	return 
 	  ":link reftype=launch object='view.exe' data='emxbook $+'."
-	    . out($txt) . ":elink.";
+	    . out($outtxt) . ":elink.";
     }
     return undef;
 }
@@ -1195,24 +1248,35 @@ sub out {
                 # link
                 pos $para = $cpos;
 		# Allow one level of included modifiers:
-                if ($para =~ m/\G(([A-Z]<[^<>]*>|[^>])+)\>/g) {
+		if ($inlink) {
+		  push (@stack, $c);
+		} elsif ($para =~ m/\G(([A-Z]<[^<>]*>|[^>])+)\>/g) {
+		    local $inlink = 1;
                     $cpos = pos $para;
-                    $link = $1;
+                    $linktxt = $link = $1;
+		    $haveliteral = 0;
+		    if ($link =~ m,^([^|]*)\|(.*),s
+			and not $link =~ m,^([^/|]*)/".*"$,s) {
+		      $linktxt = $1;
+		      $link = $2;
+		      $haveliteral = 1;
+		    }
                     $foundlink = findref($link); 
                     if (defined $links{$foundlink}) {
-		        my $blink = $link;
-			$blink =~ s|^"(.+)"$|$1|sm or
-			  $blink =~ s|^([-\w:]+)/"(.+)"$|$1: $2|sm;
-                        $output .= ":link reftype=hd refid=" .
-                            ($links{$foundlink} + $ref_delta) . '.'
-                            if $markup;
+		        my $blink = $linktxt;
+			unless ($haveliteral) {
+			  $blink =~ s|^"(.+)"$|$1|sm or
+			    $blink =~ s|^([-\w:]+)/"(.+)"$|$1: $2|sm;
+			}
+			$output .= ":link reftype=hd refid=$links{$foundlink}."
+			    if $markup;			  
                         $output .= out($blink);
                         $output .= ":elink." if $markup;
-                    } elsif ($foundlink = try_external_link($link)) {
+                    } elsif ($foundlink = try_external_link($link,$linktxt)) {
                         $output .= $foundlink if $markup;
 		    } else {
                         warn "   unresolved link: $link\n";
-                        $output .= out($link);
+                        $output .= out($linktxt);
                     }
                 }
             } elsif ($c eq 'E') {
@@ -1267,7 +1331,7 @@ sub out {
             } elsif ($c eq 'C') {
                 $output .= ':font facename=default size=0x0.' if $markup;
             } elsif ($c eq 'L') {
-                # end link
+                # end "unprocessed" link
             } else {
                 $output .= escape('>');
             }
@@ -1285,18 +1349,20 @@ sub out {
     return $output;
 }
 
-sub insert_back {
+sub insert_back {		# Args: head_level and num of finished section,
   return unless $pass == 2;
-  my $parent = find_parent(@_) + $ref_delta;
-  return if $parent == $_[1];
+  my $parent = find_parent($_[0]);
+  return if $parent == $_[0];
+  return if $parent <= 0;
   insert_nl;
   print " :link reftype=hd refid=$parent.:font facename=Courier size=8x6.Go Up:font facename=default size=0x0.:elink.\n";
   $was_nl = 1;
 }
 
+# Find the latest node before $i at level < $level
 sub find_parent {
-    my $level = $_[0];
-    my $i = $_[1] - 1;
+    my $level = $headlevel[$_[0]];
+    my $i = $_[0] - 1;
 
     while ($i > 0 && $headlevel[$i] >= $level) { $i--; }
 
@@ -1304,25 +1370,27 @@ sub find_parent {
 }
 
 sub contents {
-    my $level = $_[0];
-    my $no = $_[1];
+    my $no = $_[0];
     my ($i, $cl, $toplevel);
     local $print_index = 0;
 
-    $isempty{$no-1}++;
+    $isempty{$no}++;
     if ($pass == 1) {
-        $wingroup[$no - 1] = $groups{links};
+        $wingroup[$no] = $groups{links};
         return ;
     }
     
-    $i = find_parent($level,$no);
+    #$i = find_parent($level,$no);
+    $i = $no;
 
     $toplevel = $headlevel[$i];
+    return if $toplevel <= 0;
 
     print ":p." . out($head[$i], 1) . "\n";
     $was_nl = 1;
     $i++;
     $cl = $toplevel;
+    local $inlink = 1;
     for (; $i <= $#head && $headlevel[$i] > $toplevel; $i++) {
         if ($headlevel[$i] > $cl) {
             warn "bad nesting: $toplevel, $headlevel[$i], $cl, $i, `$head[$i]`\n" if $headlevel[$i] != $cl + 1;
@@ -1340,7 +1408,7 @@ sub contents {
 	  print ":li.", out($head[$i], 1, 1), "\n";	
 	} else {
 	  print ":li.:link reftype=hd " . winlink($i)
-            . " refid=" . ($i + $ref_delta) . "."
+            . " refid=$i."
 	      . out($head[$i], 1, 1) . ":elink.\n";
 	}
 	$was_nl = 1;
@@ -1357,7 +1425,7 @@ sub findrefid {
   my $in = shift;
   my $out = $links{findref($in)} || $x_index{$in};
   warn "No refid for `$in'\n" if $debug and not defined $out;
-  ($out || 0) + $ref_delta;
+  ($out || 0);			# XXXX misplaced link - special panel?
 }
 
 sub findref { # various heuristics to get a valid link
@@ -1405,16 +1473,34 @@ sub findref { # various heuristics to get a valid link
 	}
         print STDERR "trans: $link\n" if $debug_xref;
     }
+    if (!$_[1] and not defined $links{$link}) { # try yet harder
+      my $newlink;
+      ($newlink = $link) =~ s/\s+/ /g;
+      if ($newlink ne $link) {
+	$newlink = findref($newlink);
+	$link = $newlink if defined $links{$newlink};
+      }
+    }
+    if (!$_[1] and not defined $links{$link}) { # try yet harder
+      my $newlink;
+      ($newlink = $link) =~ s/[A-Z]<([^<>]*)>/$1/g;
+      if ($newlink ne $link) {
+	$newlink = findref($newlink);
+	$link = $newlink if defined $links{$newlink};
+      }
+    }
     $foundrefs++ if defined $links{$link};
     return $link;
 }
 
-sub addref {
+sub add_ref {
     my $page = $_[0];
     my $num = $_[1];
     my $check = $_[2];
 
+    return if $page =~ m,^perltoc/,;
     $page =~ s/\s*$//;
+#warn "<<<adding ref $num to \"$page\"\n";
     
     $links{$page} = $num unless $check and exists $links{$page};
     if ($page =~ /[A-Z]</) {
@@ -1626,6 +1712,12 @@ sub intern_modnamehash {
 	      # Now have the name, find the description:
 	      if ($theline =~ /^((\S+)(,\s+\S+)*)\s*-\s*(.*)/ ) {
 		my $desc = $4;
+		my $podname = $1;
+		if (exists $alias{$shortpath}) {
+		  $used_name = $alias{$shortpath};
+		} elsif ($believe_pod_name) {
+		  $used_name = $podname;
+		}
 		my $skipNAME;	# safe to skip NAME section
 		if (lc($used_name) eq lc($2)) {
 		  $skipNAME = length($2) == length($1);
@@ -1767,7 +1859,7 @@ sub create_tree {
 
 sub format_args {
   return "with no command-line arguments" unless @args;
-  out('with arguments C<"' . (join '"> C<"', @args) . '">', 1);
+  out('with arguments C<"' . (join qq(">\nC<"), @args) . '">', 1);
 }
 
 __END__
@@ -1808,6 +1900,7 @@ generates empty pages.
 
 Recognized command-line switches (with defaults);
 
+  --title		Title of the INF file
   --(no)burst		Print Logo and About pages	(y)
   --(no)about		Print About page		(y)
   --(no)mods		Scan through @INC		(y)
@@ -1824,11 +1917,13 @@ Recognized command-line switches (with defaults);
   --head-off		Offset of .IPF headings wrt POD	(2|0)
   --to-bold		If present, words to make bold (multiple OK)
   --to-code		If present, words to make code-like (multiple OK)
-  --section-name	Groups following --dir into a section (multiple OK)
+  --section-name	Groups next --dir/--file's into a section (multiple OK)
   --bin-dir		If present, search for binaries here too (multiple OK)
   --by-files		Interpret extra args as file names (n if options seen)
   --by-dirs		Interpret extra args as dir names (n)
   --www			Which browser to use		(lynx.exe)
+  --(no)believe-pod-name Take names from NAME sections (n)
+  --alias		Assign name to the preceding file (multiple OK)
 
 Depending on the value of C<head_off>, the toplevel sections of the generated book are formed basing on:
 

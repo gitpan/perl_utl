@@ -1,9 +1,10 @@
 extproc perl -S
 #!f:/perllib/bin/perl -w
-    eval 'exec perl -S $0 "$@"'
-	if 0;
 
-# $Id: lwp-request.PL,v 1.29 1997/10/17 07:41:25 aas Exp $
+eval 'exec f:/perllib/bin/perl -w -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+# $Id: lwp-request.PL,v 1.33 1998/08/04 09:18:11 aas Exp $
 #
 # Simple user agent using LWP library.
 
@@ -95,7 +96,7 @@ Print request method and absolute URL as requests are made.
 
 =item -U
 
-Print requeset headers in addition to request method and absolute URL.
+Print request headers in addition to request method and absolute URL.
 
 =item -s
 
@@ -174,7 +175,7 @@ $progname = $0;
 $progname =~ s,.*/,,;  # use basename only
 $progname =~ s/\.\w*$//; # strip extension, if any
 
-$VERSION = sprintf("%d.%02d", q$Revision: 1.29 $ =~ /(\d+)\.(\d+)/);
+$VERSION = sprintf("%d.%02d", q$Revision: 1.33 $ =~ /(\d+)\.(\d+)/);
 
 
 require LWP;
@@ -347,7 +348,7 @@ if ($allowed_methods{$method} eq "C") {
             : "text/plain";
     } else {
         die "$progname: Illegal Content-type format\n"
-            unless $opt_c =~ m,^[\w\-]+/[\w\-]+$,
+            unless $opt_c =~ m,^[\w\-]+/[\w\-]+(?:\s*;.*)?$,
     }
     print "Please enter content ($opt_c) to be ${method}ed:\n"
         if -t;
@@ -403,10 +404,7 @@ while ($url = shift) {
     if ($opt_S) {
 	printResponseChain($response);
     } elsif ($opt_s) {
-        # Display status code
-        my $code = $response->code;
-        print $code, " ", status_message($code), "\n";
-        
+        print $response->status_line, "\n";
     }
 
     if ($opt_e) {
@@ -477,7 +475,7 @@ sub printResponseChain
     my $method = $response->request->method;
     my $url = $response->request->url->as_string;
     my $code = $response->code;
-    print "$method $url --> $code ", status_message($code), "\n";
+    print "$method $url --> ", $response->status_line, "\n";
 }
 
 
